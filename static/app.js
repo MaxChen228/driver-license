@@ -534,9 +534,14 @@ function refreshBrowse() {
     // 答錯次數不再跟「到期」搶同一個紅點（兩個都紅等於沒有區別），改成獨立標籤
     const lapses = st && st.lapse_count
       ? `<span class="tag tag-accent trail">錯 ${st.lapse_count}</span>` : "";
+    // 圖片題在清單裡只剩「（圖片題）」四個字，等於認不出來。放張縮圖，
+    // 圖本來就已經在 Cache Storage 裡，lazy 載入不花任何網路。
+    const thumb = q.images && q.images.length
+      ? `<img class="thumb" src="/${q.images[0].file}" alt="" loading="lazy" decoding="async">` : "";
     return `<button class="row" data-id="${q.id}">
       <span class="dot ${stateOf(q.id)}" title="${STATE_LABEL[stateOf(q.id)]}"></span>
       <span class="num">${q.number}</span>
+      ${thumb}
       <span class="txt">${esc(q.stem_is_image ? "（圖片題）" : q.stem)}</span>
       ${lapses}
     </button>`;

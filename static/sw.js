@@ -12,7 +12,7 @@
 //
 // 改了 static/ 底下任何檔案就把 VERSION 加一，否則舊 SW 會繼續餵舊的 shell。
 
-const VERSION = "v3";
+const VERSION = "v4";
 const SHELL_CACHE = `shell-${VERSION}`;
 const ASSET_CACHE = `assets-${VERSION}`;   // 題庫與圖片；換版本會整批重抓，
                                            // 這是題庫改版時唯一能讓舊圖失效的手段

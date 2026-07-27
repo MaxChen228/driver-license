@@ -129,8 +129,19 @@
    結果就是「已經 hidden 的返回鍵仍然佔著 40px 並畫出來」。必須放在元件規則前面
    並加 !important —— 這是唯一比元件 class 更該贏的一條。 */
 [hidden] { display: none !important; }
-html, body { overflow-x: hidden; }
-html { -webkit-text-size-adjust: 100%; background: var(--color-bg); }
+/* 捲動的相關規則全部只掛在 html 上，body 一個都不能碰。
+   踩過的坑：`body { overflow-x: hidden }` 會讓 body 的 overflow-y 由 visible
+   變成 auto（規範：一軸非 visible 時，另一軸的 visible 用值改為 auto），body
+   於是成為一個「自己沒有東西可捲」的捲動容器；再配上 overscroll-behavior-y:
+   none，滾輪事件落在 body 上既捲不動自己、又被禁止往上傳給 viewport ——
+   結果是滑鼠滾輪整個失效，但拉右邊的捲軸還能動（那條捲軸屬於 html）。
+   html 的 overflow 本來就會傳播到 viewport，body 那份是多餘的。 */
+html {
+  overflow-x: hidden;
+  overscroll-behavior-y: none;   /* 擋掉 iOS 的下拉重整與回彈 */
+  -webkit-text-size-adjust: 100%;
+  background: var(--color-bg);
+}
 
 body {
   margin: 0;
@@ -141,7 +152,6 @@ body {
   line-height: 1.6;
   font-weight: 400;
   -webkit-font-smoothing: antialiased;
-  overscroll-behavior-y: none;
   /* 每個可點元素都有自己的 :active 樣式，iOS 預設那層灰色閃光只會蓋掉它 */
   -webkit-tap-highlight-color: transparent;
 }
@@ -553,6 +563,15 @@ main {
    讓整個版面溢出 max-width 並產生橫向捲動，ellipsis 也永遠不會生效。 */
 .row .txt { flex: 1; min-width: 0; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row .trail { flex: none; margin-left: auto; }
+
+/* 圖片題的縮圖：負的 block margin 讓它不參與列高計算 —— 34px 的圖扣掉上下各
+   5px 之後，外框高度剛好等於文字那行的 24px，有圖與沒圖的列一樣高。
+   （靠 min-height 撐是不夠的：那會把所有沒圖的列一起變高。） */
+.row .thumb {
+  flex: none; width: 34px; height: 34px; margin-block: -5px;
+  object-fit: contain; background: #fff;
+  border: 1px solid var(--color-divider);
+}
 
 /* 學習狀態：零圓角的系統裡，圓點變方塊。lapsed 另外用 accent 標籤標次數，
    不跟 due 搶同一個紅色 —— 兩個都紅就等於沒有區別。 */
