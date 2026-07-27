@@ -54,10 +54,14 @@ if [[ "$INTEGRITY" != "ok" ]]; then
   log "exit=3 integrity_check failed: $INTEGRITY"
   exit 3
 fi
-CARDS="$(sqlite3 "$TMP" 'SELECT COUNT(*) FROM card;')"
+# 健全性閘：至少要有一個帳號。不能用 card_state 的筆數 —— 惰性建列之後，
+# 一個剛註冊、還沒答過任何一題的帳號合法地是 0 列，拿它當閘會誤殺真備份。
+# 帳號表則是「DB 有東西」的最低保證：0 個帳號代表拿到的是空殼或壞檔。
+USERS="$(sqlite3 "$TMP" 'SELECT COUNT(*) FROM user;')"
+CARDS="$(sqlite3 "$TMP" 'SELECT COUNT(*) FROM card_state;')"
 EVENTS="$(sqlite3 "$TMP" 'SELECT COUNT(*) FROM review_event;')"
-if [[ "$CARDS" -eq 0 ]]; then
-  log "exit=4 snapshot has zero cards — refusing to overwrite a good backup with an empty one"
+if [[ "$USERS" -eq 0 ]]; then
+  log "exit=4 snapshot has zero users — refusing to overwrite a good backup with an empty one"
   exit 4
 fi
 
@@ -78,5 +82,5 @@ else
   rc=5
 fi
 
-log "exit=$rc bytes=$SIZE sha256=$SHA cards=$CARDS events=$EVENTS key=$KEY"
+log "exit=$rc bytes=$SIZE sha256=$SHA users=$USERS cards=$CARDS events=$EVENTS key=$KEY"
 exit "$rc"

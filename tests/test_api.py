@@ -9,7 +9,7 @@ def client(module_client):
     return module_client
 
 
-def test_decks_seeded_with_full_bank(client):
+def test_decks_report_full_bank_all_unlearned(client):
     d = client.get("/api/decks").json()
     by = {x["deck"]: x for x in d["decks"]}
     assert by["car"]["total"] == 1090
