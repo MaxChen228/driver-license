@@ -655,16 +655,23 @@ main {
 
 /* 內聯 style 屬性會被 CSP 擋掉（style-src 不含 'unsafe-inline'），改用 class */
 .set-hint { margin-top: var(--space-2); }
-
-/* 帳號區塊 */
-.acct-form { display: flex; flex-direction: column; gap: var(--space-2); margin-top: var(--space-2); }
-.acct-row { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-2); }
-.danger { color: var(--accent); }
-.btn-danger { color: var(--accent); }
-.recovery { display: flex; flex-direction: column; gap: var(--space-1); margin-top: var(--space-2);
-  padding: var(--space-3); border: 1px solid var(--line); }
-.recovery code { font-size: 1.1rem; letter-spacing: .06em; word-break: break-all; }
-.recovery span { color: var(--muted); font-size: .85rem; }
-
 .prose { max-width: 40rem; }
-.prose h2 { margin-top: var(--space-4); }
+.prose h2 { margin-top: var(--space-6); }
+
+/* 帳號區塊。這裡用到的每個 var() 都必須真的定義過 —— CSS 對未定義的自訂屬性是
+   invalid-at-computed-value-time，整個 shorthand 會退成 unset：邊框直接消失、
+   顏色掉回 inherit，而且不會有任何錯誤訊息。第一版寫了 --line / --muted / --accent
+   這三個不存在的名字，救援碼那個「刻意要擋住流程」的框就完全沒有框。 */
+.acct-form { display: flex; flex-direction: column; gap: var(--space-3); margin-top: var(--space-3); }
+.acct-row { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-3); }
+.danger { color: var(--color-accent); }
+.btn-danger { color: var(--color-accent); border-color: var(--color-accent); }
+.recovery {
+  display: flex; flex-direction: column; gap: var(--space-1);
+  margin-top: var(--space-3); padding: var(--space-4);
+  border: 2px solid var(--color-accent); background: var(--color-surface);
+}
+.recovery code {
+  font-size: 18px; letter-spacing: .06em; word-break: break-all; color: var(--color-text);
+}
+.recovery span { font-size: 13px; color: color-mix(in srgb, var(--color-text) 65%, transparent); }

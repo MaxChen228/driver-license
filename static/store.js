@@ -93,6 +93,7 @@ async function clearAll() {
     ["kv", "outbox", "events"].forEach((n) => t.objectStore(n).clear());
     t.oncomplete = resolve;
     t.onerror = () => reject(t.error);
+    t.onabort = () => reject(t.error);  // 少了它，交易被中止時這個 promise 永遠不會落地
   });
 }
 const outboxPut = (ev) => tx("outbox", "readwrite", (s) => s.put(ev));

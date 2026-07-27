@@ -75,29 +75,40 @@ def test_merging_twice_is_a_no_op(client):
     assert a == b
 
 
-def test_a_history_larger_than_one_batch_still_lands_in_order(client):
-    """超過一批的歷史要照批次順序送，否則後面的批會變成「亂序抵達」。"""
-    times = [f"2026-07-{18 + (i // 100):02d}T{i % 24:02d}:00:00+00:00"
-             for i in range(BATCH + 120)]
-    cards = [f"C{i + 1:04d}" for i in range(len(times))]
-    answers = []
-    for i, (t, cid) in enumerate(zip(times, cards)):
-        ans = client.get(f"/api/card/{cid}").json()["question"]["answer"]
-        answers.append({"card_id": cid, "chosen": ans,
-                        "client_event_id": f"big-{i}", "reviewed_at": t})
-    answers.sort(key=lambda a: a["reviewed_at"])
+def test_a_history_larger_than_one_batch_is_fully_applied(client):
+    """超過一批的歷史要一筆不漏地落地，而且結果與單批送出相同。
 
+    刻意讓同一張卡跨越批次邊界被答很多次 —— 每張卡各答一次的話 review_count
+    在任何情況下都是 1，測試等於什麼都沒驗。
+    （批次「順序」本身不影響正確性，那是 Phase 3 的收斂保證負責的；
+    這裡驗的是「620 筆真的全部進去了」。）
+    """
+    answer = client.get(f"/api/card/{CARD}").json()["question"]["answer"]
+    n = BATCH + 120
+    # 同一張卡連答 620 次，時間嚴格遞增，剛好跨過 500 的批次邊界
+    answers = [
+        {"card_id": CARD, "chosen": answer, "client_event_id": f"big-{i}",
+         "reviewed_at": f"2026-07-18T00:00:00.{i:06d}+00:00"}
+        for i in range(n)
+    ]
     out = _push(client, answers)
-    assert len(out["sync"]["applied"]) + len(out["sync"]["skipped"]) > 0
-    assert len(out["states"]) == len(cards)
-    assert all(s["review_count"] == 1 for s in out["states"])
+
+    st = next(s for s in out["states"] if s["id"] == CARD)
+    assert st["review_count"] == n
+    assert st["streak"] == n            # 全部答對，一次都沒有被當成亂序而重算歸零
+    assert st["interval_hours"] == 1440.0  # 早就撞到 60 天上限
+    # 最後一筆的時間決定下次到期 —— 順序錯了這個值就會指向別筆
+    assert st["next_review_at"].startswith("2026-09-16T00:00:00.000619")
 
 
-def test_choosing_the_account_instead_discards_nothing_server_side(tmp_path_factory):
-    """選「改用帳號上的紀錄」時，前端清本機、完全不送 —— 伺服器不該有任何變化。"""
-    with _fresh_client(tmp_path_factory.mktemp("keep")) as c:
-        _push(c, _events(c, ["2026-07-18T02:00:00+00:00"]))
-        before = c.get("/api/state").json()
-        # 「取消合併」那條路徑不會呼叫 /api/sync，只重新拉一次狀態
-        after = c.get("/api/state").json()
-        assert before["states"] == after["states"]
+def test_notes_survive_a_merge_with_no_answers_at_all(client):
+    """一題都沒答、只寫過筆記的裝置，登入後筆記不能消失。
+
+    題庫頁點開一題直接寫筆記就會落到這個狀態。前端的 pushLocalHistory 若因為
+    「沒有事件」而整個迴圈跳過，就完全不會送出 notes，接著 /api/state 回一份空的、
+    SNAP 被整份取代 —— 筆記安靜地被刪掉。合併要帶過去的東西裡，筆記正是其中一項。
+    """
+    out = client.post("/api/sync", json={"answers": [], "notes": {CARD: "只有筆記"}}).json()
+    assert out["notes"] == {CARD: "只有筆記"}
+    assert out["states"] == []          # 真的一題都沒答
+    assert client.get("/api/state").json()["notes"] == {CARD: "只有筆記"}

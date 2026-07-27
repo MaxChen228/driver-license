@@ -59,6 +59,7 @@ async function boot() {
   }
 
   MODE = (await store.kvGet("mode")) || "local";
+  if (MODE === "account") ME = { username: (await store.kvGet("username")) || "" };
   SNAP = adopt((await store.kvGet("snapshot")) || emptySnapshot());
 
   if (signedIn()) {
@@ -69,6 +70,7 @@ async function boot() {
     } catch (e) {
       // 401 = session 過期。切回本機繼續用，不清資料 —— 只有明確登出才清。
       if (String(e.message).startsWith("401")) await goLocal();
+      else console.warn("開機時同步失敗（離線或伺服器有問題），先用本機快照", e);
     }
   }
 
@@ -223,7 +225,8 @@ async function replayPending() {
       ev.card_id,
       {
         id: ev.card_id, deck: q.deck,
-        ...srs.applyFeedback(SNAP.states.get(ev.card_id), remembered, params(),
+        ...srs.applyFeedback(SNAP.states.get(ev.card_id), remembered,
+                             srs.params(ev.preset || SNAP.preset),
                              new Date(ev.reviewed_at)),
       }
     );
@@ -433,6 +436,7 @@ async function submit(chosen, guessed = false) {
     guessed,
     elapsed_ms: Math.round(performance.now() - S.t0),
     reviewed_at: new Date().toISOString(),   // 真實牆鐘時間，供熱力圖與補送排序
+    preset: SNAP.preset,  // 重放時要用「當時」的參數，不是現在的（比照 schema v3）
   };
   // events 是這台裝置的完整歷史，兩種模式都寫、永遠留著（登入時要拿它併進帳號，
   // 匿名時要拿它算正確率與連續天數）。outbox 只是待補送佇列，匿名模式不寫 ——
@@ -827,8 +831,12 @@ async function pushLocalHistory() {
   // 照順序送 = 伺服器走增量快路徑，不必回頭重算。
   const evs = await store.eventsAll();
   const notes = Object.fromEntries(SNAP.notes);
-  for (let i = 0; i < evs.length; i += 500) {
-    const answers = evs.slice(i, i + 500).map((e) => ({
+  // 至少送一次，即使一題都沒答過。筆記可以在沒有任何作答的情況下存在
+  // （題庫頁點開一題、直接寫筆記就是），而 enterAccount 之後 SNAP 會被伺服器的
+  // 狀態整份取代 —— 迴圈被跳過就等於把那些筆記安靜地刪掉。
+  const batches = Math.max(1, Math.ceil(evs.length / 500));
+  for (let i = 0; i < batches; i += 1) {
+    const answers = evs.slice(i * 500, (i + 1) * 500).map((e) => ({
       card_id: e.card_id, chosen: e.chosen, guessed: e.guessed,
       elapsed_ms: e.elapsed_ms, reviewed_at: e.reviewed_at,
       client_event_id: e.client_event_id,
@@ -840,15 +848,24 @@ async function pushLocalHistory() {
   }
 }
 
-async function enterAccount(username, { merge }) {
+async function enterAccount(username, { merge, replaceLocal = false }) {
   // 先確定伺服器真的認這個 session，最後才切換模式。反過來的話，只要中間
   // 任何一步失敗（cookie 沒帶上、網路斷了），app 就會停在「自稱已登入但
   // 每個請求都 401」的狀態，而使用者看到的是一個壞掉的畫面而不是錯誤訊息。
   if (merge) await pushLocalHistory();
   const state = await api("/api/state");
+  // 清本機一定要等到「伺服器狀態已經拿在手上」之後。先清再拿的話，中間任何一個
+  // 失敗都會讓資料已經沒了、而使用者只看到「登入失敗」。
+  // config 要放回去 —— clearAll 連它一起清掉，而 loadConfig 的離線退路靠它，
+  // 少了它就會在下次離線開機時謊稱「這台裝置還沒下載過題庫」。
+  if (replaceLocal) {
+    await store.clearAll();
+    await store.kvPut("config", CONFIG);
+  }
   MODE = "account";
   ME = { username };
   await store.kvPut("mode", "account");
+  await store.kvPut("username", username);  // 離線冷開機時 /api/me 問不到，靠這個顯示
   SNAP = adopt(state);
   await store.kvPut("notes_dirty", {});
   await persist();
@@ -942,20 +959,22 @@ async function doLogin() {
   const local = await store.eventsCount();
   let merge = true;
   if (local) {
-    // 這個選擇不可撤銷，所以要把兩邊的後果都講出來，而不是問「要合併嗎？」
-    merge = confirm(
+    // 破壞性的那一邊必須是「確定」，不能是「取消」。瀏覽器抑制對話框時
+    // confirm() 會直接回 false 而且根本不顯示（Chrome 的「防止此頁面產生額外對話方塊」
+    // 在同一次設定頁操作中就按得到）—— 那時預設落在哪一邊，就決定了使用者的
+    // 全部本機紀錄會不會在沒被問過的情況下被清掉。
+    merge = !confirm(
       `這台裝置上有 ${local} 筆作答紀錄。\n\n` +
-      `［確定］把它們併入帳號 —— 兩邊的紀錄會合起來算。\n` +
-      `［取消］改用帳號上的紀錄 —— 這台裝置上的 ${local} 筆會被丟掉。\n\n` +
-      `這個選擇無法復原。`
+      `［確定］改用帳號上的紀錄 —— 這台裝置上的 ${local} 筆會被丟掉。\n` +
+      `［取消］把它們併入帳號 —— 兩邊的紀錄會合起來算。\n\n` +
+      `這個選擇無法復原。不確定就選取消。`
     );
   }
   try {
     const r = await api("/api/auth/login", {
       method: "POST", body: JSON.stringify({ username, password }),
     });
-    if (!merge) await store.clearAll();
-    await enterAccount(r.username, { merge });
+    await enterAccount(r.username, { merge, replaceLocal: !merge });
     await renderSettings();
     acctMsg(merge && local ? `已登入，${local} 筆本機紀錄已併入帳號。` : "已登入。");
   } catch (e) {
@@ -990,8 +1009,12 @@ async function exportData() {
   const a = document.createElement("a");
   a.href = url;
   a.download = `driver-license-${new Date().toISOString().slice(0, 10)}.json`;
+  // 要掛進 document 才點得動（iOS standalone 對 detached 的 <a download> 不友善），
+  // 而 revoke 不能緊接著做 —— 那會跟下載開始賽跑，Safari／Firefox 上會拿到空檔。
+  document.body.appendChild(a);
   a.click();
-  URL.revokeObjectURL(url);
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
 async function importData(file) {
@@ -999,8 +1022,16 @@ async function importData(file) {
   try {
     data = JSON.parse(await file.text());
     if (data.version !== 1 || !Array.isArray(data.events)) throw new Error("shape");
+    // 每一筆都要有 keyPath 與最小欄位。缺 client_event_id 的話 IndexedDB 會丟
+    // DataError，而那個 rejection 沒有人接 —— 使用者會得到一份半套的匯入，
+    // 而且畫面上什麼都不會說。
+    for (const ev of data.events) {
+      if (!ev || typeof ev.client_event_id !== "string" ||
+          typeof ev.card_id !== "string" || typeof ev.chosen !== "number" ||
+          typeof ev.reviewed_at !== "string") throw new Error("event");
+    }
   } catch {
-    return acctMsg("這個檔案不是本 app 匯出的備份。", true);
+    return acctMsg("這個檔案不是本 app 匯出的備份，或內容已損壞。", true);
   }
   if (!confirm(
     `要匯入 ${data.events.length} 筆作答紀錄嗎？\n` +
@@ -1018,7 +1049,8 @@ async function importData(file) {
     const remembered = ev.chosen === q.answer && !ev.guessed;
     SNAP.states.set(ev.card_id, {
       id: ev.card_id, deck: q.deck,
-      ...srs.applyFeedback(SNAP.states.get(ev.card_id), remembered, params(),
+      ...srs.applyFeedback(SNAP.states.get(ev.card_id), remembered,
+                           srs.params(ev.preset || SNAP.preset),
                            new Date(ev.reviewed_at)),
     });
   }
@@ -1092,7 +1124,10 @@ async function setSetting(patch) {
       SNAP = adopt({ ...await api("/api/state") });
     } catch (e) {
       if (String(e.message).startsWith("401")) await goLocal();
-      else return flash($("#set-body"), "改不動，稍後再試");
+      // 不能用 flash()：它會在 1.1 秒後還原 innerHTML，把 renderSettings 綁的
+      // 每一個 listener（preset、暫停、五個帳號按鈕、匯出匯入）全部炸掉，
+      // 整頁變成死的而且沒有任何跡象。
+      else return acctMsg("設定改不動，稍後再試。", true);
     }
   }
   if (!signedIn()) {

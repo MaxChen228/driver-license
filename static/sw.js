@@ -11,6 +11,12 @@
 //   /api/*               → 一律不快取。過期的 API 回應比一個誠實的錯誤更糟。
 //
 // 改了 static/ 底下任何檔案就把 VERSION 加一，否則舊 SW 會繼續餵舊的 shell。
+//
+// 題庫改版（data/*_questions.json 的 source.version 變動）時**也必須**加 VERSION。
+// 理由：題庫網址帶版號，而 /api/config 是 stale-while-revalidate —— 改版後第一次
+// 載入拿到的是舊 config（舊 ?v=，在 ASSET_CACHE 裡，能用），第二次才拿到新 config，
+// 而新的 ?v= 網址還沒被快取過。若使用者剛好在那一刻離線，loadBanks 會失敗、
+// 開機直接掉進「這台裝置還沒下載過題庫」。加 VERSION 會重跑 install，一次補齊。
 
 const VERSION = "v5";
 const SHELL_CACHE = `shell-${VERSION}`;

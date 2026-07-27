@@ -16,14 +16,19 @@ cd "$(dirname "$0")/.."
 
 SECRETS="${DL_SECRETS_FILE:-$HOME/.secrets/driver-license.env}"
 if [[ -f "$SECRETS" ]]; then
-  # source 一個外部檔在 set -e 之下很危險：檔案裡任何一行非零退出（打錯字、
-  # Syncthing 留下的 .sync-conflict 污染）都會讓 wrapper 直接死掉，而 plist 是
-  # KeepAlive=true —— 結果是無聲的重啟迴圈。明確檢查並說出原因。
-  # shellcheck disable=SC1090
-  if ! { set -a; source "$SECRETS"; set +a; }; then
-    echo "run-server: $SECRETS 讀取失敗，拒絕以未知組態啟動" >&2
+  # 先驗格式再 source。原本寫成 `if ! { set -a; source ...; set +a; }` 是無效的
+  # 保護：set -e 會在檔案裡出錯的那一行就把整個腳本殺掉（訊息永遠印不出來），
+  # 而就算沒被殺，那個群組的結束狀態取自最後一個指令 `set +a`，恆為 0。
+  # 真正要擋的情境是 Syncthing 留下的 .sync-conflict 之類的污染檔 —— 那種東西
+  # 不會是 KEY=VALUE，先掃一遍就攔得住。而 plist 是 KeepAlive=true，
+  # 沒攔住的話症狀是無聲的重啟迴圈。
+  if grep -qvE '^[[:space:]]*(#|[A-Za-z_][A-Za-z0-9_]*=|$)' "$SECRETS"; then
+    echo "run-server: $SECRETS 含有不是 KEY=VALUE 的行，拒絕以未知組態啟動" >&2
+    grep -nvE '^[[:space:]]*(#|[A-Za-z_][A-Za-z0-9_]*=|$)' "$SECRETS" | head -3 >&2
     exit 78
   fi
+  # shellcheck disable=SC1090
+  set -a; source "$SECRETS"; set +a
 else
   echo "run-server: 找不到 $SECRETS，以開發模式啟動（/api/docs 開啟、Turnstile 關閉）" >&2
 fi

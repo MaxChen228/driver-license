@@ -336,7 +336,9 @@ def test_oversized_username_is_refused_before_it_becomes_a_ratelimit_key(anon_cl
     r = anon_client.post("/api/auth/login",
                          json={"username": "x" * 5000, "password": GOOD})
     assert r.status_code == 422
-    assert ratelimit.LOGIN_USER.check("x" * 5000) == 0  # 從沒進過那個字典
+    # 直接看字典。用 check() 驗是沒有意義的 —— capacity=8，不管有沒有插入都回 0，
+    # 而且那個呼叫本身還會把這把 5000 字的 key 永久塞進共用的 limiter 裡。
+    assert "x" * 5000 not in ratelimit.LOGIN_USER._buckets
 
 
 def test_ratelimit_buckets_do_not_grow_without_bound():
