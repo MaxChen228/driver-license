@@ -655,3 +655,13 @@ main {
 
 /* 內聯 style 屬性會被 CSP 擋掉（style-src 不含 'unsafe-inline'），改用 class */
 .set-hint { margin-top: var(--space-2); }
+
+/* 帳號區塊 */
+.acct-form { display: flex; flex-direction: column; gap: var(--space-2); margin-top: var(--space-2); }
+.acct-row { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-2); }
+.danger { color: var(--accent); }
+.btn-danger { color: var(--accent); }
+.recovery { display: flex; flex-direction: column; gap: var(--space-1); margin-top: var(--space-2);
+  padding: var(--space-3); border: 1px solid var(--line); }
+.recovery code { font-size: 1.1rem; letter-spacing: .06em; word-break: break-all; }
+.recovery span { color: var(--muted); font-size: .85rem; }

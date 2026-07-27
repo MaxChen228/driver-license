@@ -751,7 +751,7 @@ async function renderSettings() {
   // 只有「登入 + 離線」才改不動設定：那時伺服器是權威，本地改了會跟它對不起來。
   // 匿名模式的設定本來就住在這台裝置上，離線照樣能改。
   const off = signedIn() && !navigator.onLine;
-  $("#set-body").innerHTML = `
+  $("#set-body").innerHTML = accountBlock() + `
     <div class="set-block">
       <h3>複習節奏</h3>
       <dl class="kv">
@@ -780,6 +780,17 @@ async function renderSettings() {
         ${ico("download", "ico ico-sm")}<span>重新下載離線題庫</span></button>
     </div>
     <div class="set-block">
+      <h3>備份這台裝置的紀錄</h3>
+      <p>${signedIn()
+        ? "已登入，進度也存在伺服器上。匯出仍可留一份自己的副本。"
+        : "進度只存在這個瀏覽器裡 —— 清除瀏覽資料就會消失。"}</p>
+      <div class="acct-row">
+        <button class="btn btn-secondary" id="set-export">匯出 JSON</button>
+        <button class="btn btn-secondary" id="set-import">匯入備份</button>
+        <input type="file" id="set-import-file" accept="application/json" hidden>
+      </div>
+    </div>
+    <div class="set-block">
       <h3>答錯不會歸零</h3>
       <p>答錯是把間隔乘上 ${p.forgot_mult}、不是打回新卡。排到 30 天的題答錯後回到 15 天，累積的記憶強度會保留。</p>
     </div>`;
@@ -792,12 +803,286 @@ async function renderSettings() {
   // 改完直接採用它回傳的狀態，不要自己猜它會怎麼算（例如 paused_at）。
   $("#set-preset").addEventListener("change", (e) => setSetting({ preset: e.target.value }));
   $("#set-pause").addEventListener("change", (e) => setSetting({ paused: e.target.checked }));
+  bindAccountHandlers();
+  $("#set-export").addEventListener("click", exportData);
+  $("#set-import").addEventListener("click", () => $("#set-import-file").click());
+  $("#set-import-file").addEventListener("change", (e) => {
+    if (e.target.files[0]) importData(e.target.files[0]);
+  });
   $("#set-precache").addEventListener("click", () => {
     navigator.serviceWorker && navigator.serviceWorker.controller &&
       navigator.serviceWorker.controller.postMessage("precache-images");
     flash($("#set-precache"), "下載中…");
   });
   show("settings");
+}
+
+// ── 帳號 ──────────────────────────────────────────────
+// 帳號存在的唯一理由是跨裝置同步。不登入一樣能用完整的 app，所以這一段的
+// 每個失敗路徑都必須留在原地不動，不能把人鎖在外面。
+
+async function pushLocalHistory() {
+  // 分批送，一批 500 筆。整批一次送會撞上伺服器的 5000 筆上限，而且
+  // 一個請求做太多事本來就不是好主意。events 依 key 排序即時間序，
+  // 照順序送 = 伺服器走增量快路徑，不必回頭重算。
+  const evs = await store.eventsAll();
+  const notes = Object.fromEntries(SNAP.notes);
+  for (let i = 0; i < evs.length; i += 500) {
+    const answers = evs.slice(i, i + 500).map((e) => ({
+      card_id: e.card_id, chosen: e.chosen, guessed: e.guessed,
+      elapsed_ms: e.elapsed_ms, reviewed_at: e.reviewed_at,
+      client_event_id: e.client_event_id,
+    }));
+    await api("/api/sync", {
+      method: "POST",
+      body: JSON.stringify({ answers, notes: i === 0 ? notes : {} }),
+    });
+  }
+}
+
+async function enterAccount(username, { merge }) {
+  // 先確定伺服器真的認這個 session，最後才切換模式。反過來的話，只要中間
+  // 任何一步失敗（cookie 沒帶上、網路斷了），app 就會停在「自稱已登入但
+  // 每個請求都 401」的狀態，而使用者看到的是一個壞掉的畫面而不是錯誤訊息。
+  if (merge) await pushLocalHistory();
+  const state = await api("/api/state");
+  MODE = "account";
+  ME = { username };
+  await store.kvPut("mode", "account");
+  SNAP = adopt(state);
+  await store.kvPut("notes_dirty", {});
+  await persist();
+}
+
+async function leaveAccount() {
+  // 登出要把本機清乾淨。共用裝置上留著別人的進度是不能接受的 ——
+  // 而且下一個匿名使用者會看到一份不屬於他的快照，還以為是自己的。
+  const config = CONFIG;
+  await store.clearAll();
+  await store.kvPut("config", config);
+  MODE = "local";
+  ME = null;
+  SNAP = adopt(emptySnapshot());
+  await persist();
+}
+
+function accountBlock() {
+  if (signedIn()) {
+    return `<div class="set-block">
+      <h3>帳號</h3>
+      <p>以 <b>${esc(ME ? ME.username : "")}</b> 登入中，進度會同步到這個帳號。</p>
+      <div class="acct-row">
+        <button class="btn btn-secondary" id="acct-logout">登出這台裝置</button>
+        <button class="btn btn-secondary" id="acct-chpw">更改密碼</button>
+        <button class="btn btn-danger" id="acct-delete">刪除帳號</button>
+      </div>
+      <p id="acct-msg" class="muted"></p>
+    </div>`;
+  }
+  return `<div class="set-block">
+    <h3>帳號<span class="tag">選用</span></h3>
+    <p>現在的進度只存在這台裝置上。要在手機與電腦之間同步，才需要帳號。</p>
+    <div class="acct-form">
+      <input class="input" id="acct-user" placeholder="帳號（3-32 字，英數字、_、-）"
+             autocomplete="username" autocapitalize="off" spellcheck="false">
+      <input class="input" id="acct-pass" type="password" placeholder="密碼（至少 10 字）"
+             autocomplete="current-password">
+      ${CONFIG.turnstile_sitekey
+        ? `<div class="cf-turnstile" data-sitekey="${esc(CONFIG.turnstile_sitekey)}"></div>` : ""}
+      <div class="acct-row">
+        <button class="btn" id="acct-login">登入</button>
+        <button class="btn btn-secondary" id="acct-register">註冊新帳號</button>
+      </div>
+    </div>
+    <p id="acct-msg" class="muted"></p>
+  </div>`;
+}
+
+function acctMsg(text, bad = false) {
+  const el = $("#acct-msg");
+  if (!el) return;
+  el.textContent = text;
+  el.className = bad ? "danger" : "muted";
+}
+
+// 沒有 email 就沒有寄信重設密碼。救援碼是唯一的後路，所以顯示它的時候
+// 要擋在流程中間，不能只是印一行讓人滑過去。
+function showRecoveryCode(code) {
+  const box = $("#acct-msg");
+  box.className = "recovery";
+  box.innerHTML =
+    `<b>救援碼</b><code>${esc(code)}</code>
+     <span>忘記密碼時，這是唯一能拿回帳號的東西 —— 沒有 email 可以寄。
+     抄到手機以外的地方。它只會出現這一次。</span>`;
+}
+
+async function doRegister() {
+  const username = $("#acct-user").value.trim();
+  const password = $("#acct-pass").value;
+  const token = window.turnstile && $(".cf-turnstile")
+    ? window.turnstile.getResponse() : undefined;
+  try {
+    const r = await api("/api/auth/register", {
+      method: "POST",
+      body: JSON.stringify({ username, password, turnstile_token: token }),
+    });
+    // 剛註冊的帳號伺服器上必然是空的，所以一律合併 —— 這裡問「要不要保留
+    // 本機進度」只會製造一個「選錯就全沒了」的選項。
+    await enterAccount(r.username, { merge: true });
+    await renderSettings();
+    showRecoveryCode(r.recovery_code);  // 必須在重繪之後，否則會被蓋掉
+  } catch (e) {
+    acctMsg(await errText(e, "註冊失敗"), true);
+  }
+}
+
+async function doLogin() {
+  const username = $("#acct-user").value.trim();
+  const password = $("#acct-pass").value;
+  const local = await store.eventsCount();
+  let merge = true;
+  if (local) {
+    // 這個選擇不可撤銷，所以要把兩邊的後果都講出來，而不是問「要合併嗎？」
+    merge = confirm(
+      `這台裝置上有 ${local} 筆作答紀錄。\n\n` +
+      `［確定］把它們併入帳號 —— 兩邊的紀錄會合起來算。\n` +
+      `［取消］改用帳號上的紀錄 —— 這台裝置上的 ${local} 筆會被丟掉。\n\n` +
+      `這個選擇無法復原。`
+    );
+  }
+  try {
+    const r = await api("/api/auth/login", {
+      method: "POST", body: JSON.stringify({ username, password }),
+    });
+    if (!merge) await store.clearAll();
+    await enterAccount(r.username, { merge });
+    await renderSettings();
+    acctMsg(merge && local ? `已登入，${local} 筆本機紀錄已併入帳號。` : "已登入。");
+  } catch (e) {
+    acctMsg(await errText(e, "登入失敗"), true);
+  }
+}
+
+async function errText(e, fallback) {
+  const m = String(e.message || "");
+  if (m.startsWith("429")) return "嘗試太頻繁，稍後再試。";
+  if (m.startsWith("401")) return "帳號或密碼不正確。";
+  if (m.startsWith("409")) return "這個帳號已經有人用了。";
+  if (m.startsWith("400")) return "帳號或密碼不符合規則（密碼至少 10 字，且不能是常見密碼）。";
+  return fallback;
+}
+
+// ── 匯出 / 匯入 ───────────────────────────────────────
+// 匿名使用者的進度只活在這個瀏覽器裡。清一次瀏覽資料就沒了，
+// 而那是使用者自己隨時可能做的事 —— 這是唯一的保險。
+
+async function exportData() {
+  const payload = {
+    version: 1,
+    exported_at: new Date().toISOString(),
+    events: await store.eventsAll(),
+    notes: Object.fromEntries(SNAP.notes),
+    settings: { preset: SNAP.preset, paused: SNAP.paused, paused_at: SNAP.paused_at },
+  };
+  const url = URL.createObjectURL(
+    new Blob([JSON.stringify(payload)], { type: "application/json" })
+  );
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `driver-license-${new Date().toISOString().slice(0, 10)}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+async function importData(file) {
+  let data;
+  try {
+    data = JSON.parse(await file.text());
+    if (data.version !== 1 || !Array.isArray(data.events)) throw new Error("shape");
+  } catch {
+    return acctMsg("這個檔案不是本 app 匯出的備份。", true);
+  }
+  if (!confirm(
+    `要匯入 ${data.events.length} 筆作答紀錄嗎？\n` +
+    `它們會與這台裝置現有的紀錄合併（同一筆不會重複計算）。`
+  )) return;
+
+  // 逐筆重放，順序照 reviewed_at —— 與伺服器的重算是同一套規則
+  for (const ev of data.events) await store.eventsPut(ev);
+  const all = (await store.eventsAll())
+    .sort((a, b) => new Date(a.reviewed_at) - new Date(b.reviewed_at));
+  SNAP.states = new Map();
+  for (const ev of all) {
+    const q = question(ev.card_id);
+    if (!q) continue;
+    const remembered = ev.chosen === q.answer && !ev.guessed;
+    SNAP.states.set(ev.card_id, {
+      id: ev.card_id, deck: q.deck,
+      ...srs.applyFeedback(SNAP.states.get(ev.card_id), remembered, params(),
+                           new Date(ev.reviewed_at)),
+    });
+  }
+  for (const [k, v] of Object.entries(data.notes || {})) SNAP.notes.set(k, v);
+  if (data.settings && data.settings.preset) SNAP.preset = data.settings.preset;
+  await persist();
+  if (signedIn()) {
+    for (const ev of data.events) await store.outboxPut(ev);
+    await syncSoon();
+  }
+  await renderSettings();
+  acctMsg(`已匯入 ${data.events.length} 筆紀錄。`);
+}
+
+function bindAccountHandlers() {
+  if (signedIn()) {
+    $("#acct-logout").addEventListener("click", async () => {
+      if (!confirm(
+        "登出會把這台裝置上的本機資料一併清掉（伺服器上的進度不受影響）。\n" +
+        "共用裝置上不能把進度留給下一個人。要繼續嗎？"
+      )) return;
+      await api("/api/auth/logout", { method: "POST" }).catch(() => {});
+      await leaveAccount();
+      await renderSettings();
+      acctMsg("已登出，這台裝置回到未登入狀態。");
+    });
+    $("#acct-chpw").addEventListener("click", async () => {
+      const current = prompt("目前的密碼：");
+      if (!current) return;
+      const next = prompt("新密碼（至少 10 字）：");
+      if (!next) return;
+      try {
+        const r = await api("/api/auth/password", {
+          method: "POST",
+          body: JSON.stringify({ current_password: current, new_password: next }),
+        });
+        await renderSettings();
+        showRecoveryCode(r.recovery_code);
+      } catch (e) {
+        acctMsg(await errText(e, "改密碼失敗"), true);
+      }
+    });
+    $("#acct-delete").addEventListener("click", async () => {
+      const pw = prompt("刪除帳號會連同伺服器上的所有進度一起消失，無法復原。\n輸入密碼確認：");
+      if (!pw) return;
+      try {
+        await api("/api/account", { method: "DELETE", body: JSON.stringify({ password: pw }) });
+        await leaveAccount();
+        await renderSettings();
+        acctMsg("帳號已刪除。");
+      } catch (e) {
+        acctMsg(await errText(e, "刪除失敗"), true);
+      }
+    });
+    return;
+  }
+  $("#acct-login").addEventListener("click", doLogin);
+  $("#acct-register").addEventListener("click", doRegister);
+  if (CONFIG.turnstile_sitekey && !window.turnstile) {
+    const sc = document.createElement("script");
+    sc.src = "https://challenges.cloudflare.com/turnstile/v0/api.js";
+    sc.async = true;
+    document.head.appendChild(sc);
+  }
 }
 
 async function setSetting(patch) {
