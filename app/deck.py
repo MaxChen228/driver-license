@@ -65,8 +65,3 @@ def _load_one(key: str) -> Deck:
 
 def load_decks() -> dict[str, Deck]:
     return {k: _load_one(k) for k in DECKS}
-
-
-def all_cards(decks: dict[str, Deck]) -> list[tuple[str, str]]:
-    """(card_id, deck) 全集，供 DB seed。"""
-    return [(q["id"], d.key) for d in decks.values() for q in d.questions]

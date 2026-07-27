@@ -7,19 +7,13 @@ from __future__ import annotations
 
 import os
 import sqlite3
-import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .srs import DEFAULT_PRESET, CardState
+from .srs import DEFAULT_PRESET, CardState, ReviewSettings
 
 DATA_DIR = Path(os.environ.get("DL_DATA_DIR", Path.home() / "driver-license-data"))
-
-# 單一連線被 FastAPI 的 threadpool 共用（check_same_thread=False）。一次作答是
-# UPDATE + INSERT + COMMIT 三步，兩個請求交錯時 A 的 COMMIT 會把 B 寫到一半的
-# 交易一起提交。單人一次按一題碰不到，但離線補送是「一次送一整批」，跟現場作答
-# 撞在一起的機率不再是零 —— 寫入路徑一律進這把鎖。
-WRITE_LOCK = threading.Lock()
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS card (
@@ -106,32 +100,69 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(stmt)
 
 
-def connect(path: Path | None = None) -> sqlite3.Connection:
-    p = path or (DATA_DIR / "app.db")
-    p.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(p, check_same_thread=False)
+def db_path() -> Path:
+    return DATA_DIR / "app.db"
+
+
+def _configure(conn: sqlite3.Connection) -> None:
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    # 沒有 busy_timeout 的話，第二個寫入者會立刻拿到 SQLITE_BUSY 而不是等一下。
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA foreign_keys=ON")
-    conn.executescript(SCHEMA)
-    _migrate(conn)
-    conn.commit()
-    return conn
+    conn.execute("PRAGMA synchronous=NORMAL")  # WAL 下的建議值：省掉每次 commit 的 fsync
 
 
-def seed_cards(conn: sqlite3.Connection, cards: list[tuple[str, str]]) -> int:
-    """upsert 補齊新題號、不刪舊卡（題庫改版時進度不會被清掉）。"""
-    cur = conn.executemany(
-        "INSERT INTO card(id, deck) VALUES(?, ?) ON CONFLICT(id) DO NOTHING", cards
-    )
-    conn.commit()
-    return cur.rowcount
+def init(path: Path | None = None) -> None:
+    """建檔、建 schema、跑遷移。程序啟動時呼叫一次。"""
+    p = path or db_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(p)
+    try:
+        _configure(conn)
+        conn.execute("PRAGMA journal_mode=WAL")  # 寫進檔案本身，設一次就永久有效
+        conn.executescript(SCHEMA)
+        _migrate(conn)
+        conn.commit()
+    finally:
+        conn.close()
 
 
-def get_state(conn: sqlite3.Connection, card_id: str) -> CardState | None:
+@contextmanager
+def session(write: bool = False):
+    """一個請求一條連線，交易邊界明確。
+
+    原本是「整個 process 共用一條連線 + 一把 Python threading.Lock」。那把鎖擋得住
+    同 process 的交錯 COMMIT，但擋不住多 worker，而且兩條寫入路徑（PUT /api/note、
+    PUT /api/settings）根本沒進鎖。改成交給 SQLite 自己：寫入走 BEGIN IMMEDIATE，
+    開頭就取得 RESERVED 鎖，衝突時由 busy_timeout 等待而不是寫到一半才炸。
+
+    讀取走 BEGIN DEFERRED，WAL 下等於拿到一個穩定快照 —— /api/state 要一次讀
+    states + notes + settings，中間被寫入插隊會回傳自相矛盾的內容。
+    """
+    conn = sqlite3.connect(db_path(), isolation_level=None)  # 交易由我們自己開
+    try:
+        _configure(conn)
+        conn.execute("BEGIN IMMEDIATE" if write else "BEGIN DEFERRED")
+        try:
+            yield conn
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+
+
+def get_state(conn: sqlite3.Connection, card_id: str, cfg: ReviewSettings) -> CardState:
+    """查無列 = 沒答過 = 全新卡。
+
+    以前是啟動時把 1896 張卡全部 seed 進 DB，所以列必然存在。多使用者之後那筆
+    帳變成「每註冊一人寫 1896 列」，不能接受；改成答過才建列。derive_state 本來
+    就把 review_count == 0 定義成未學習，「沒有列」與「有列但沒答過」語義相同。
+    """
     row = conn.execute("SELECT * FROM card WHERE id = ?", (card_id,)).fetchone()
     if row is None:
-        return None
+        return CardState.fresh(cfg)
     return CardState(
         review_interval_hours=row["review_interval_hours"],
         next_review_at=parse(row["next_review_at"]),
@@ -143,12 +174,23 @@ def get_state(conn: sqlite3.Connection, card_id: str) -> CardState | None:
     )
 
 
-def put_state(conn: sqlite3.Connection, card_id: str, s: CardState) -> None:
+def put_state(conn: sqlite3.Connection, card_id: str, deck: str, s: CardState) -> None:
+    """upsert —— 惰性建列之後，第一次作答時該列還不存在。"""
     conn.execute(
-        """UPDATE card SET review_interval_hours=?, next_review_at=?, last_reviewed_at=?,
-                           review_count=?, lapse_count=?, review_streak=?, last_review_feedback=?
-           WHERE id=?""",
+        """INSERT INTO card(id, deck, review_interval_hours, next_review_at, last_reviewed_at,
+                            review_count, lapse_count, review_streak, last_review_feedback)
+           VALUES(?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(id) DO UPDATE SET
+             review_interval_hours=excluded.review_interval_hours,
+             next_review_at=excluded.next_review_at,
+             last_reviewed_at=excluded.last_reviewed_at,
+             review_count=excluded.review_count,
+             lapse_count=excluded.lapse_count,
+             review_streak=excluded.review_streak,
+             last_review_feedback=excluded.last_review_feedback""",
         (
+            card_id,
+            deck,
             s.review_interval_hours,
             iso(s.next_review_at),
             iso(s.last_reviewed_at),
@@ -156,7 +198,6 @@ def put_state(conn: sqlite3.Connection, card_id: str, s: CardState) -> None:
             s.lapse_count,
             s.review_streak,
             s.last_review_feedback,
-            card_id,
         ),
     )
 
@@ -215,7 +256,6 @@ def set_setting(conn: sqlite3.Connection, key: str, value: str) -> None:
         "INSERT INTO setting(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         (key, value),
     )
-    conn.commit()
 
 
 def preset_name(conn: sqlite3.Connection) -> str:

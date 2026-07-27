@@ -4,25 +4,7 @@
 補送順序錯亂導致間隔算錯。這三件事在正常使用時看不出來，只會安靜地把排程算歪。
 """
 
-import importlib
-import os
 from datetime import datetime, timedelta, timezone
-
-import pytest
-from fastapi.testclient import TestClient
-
-
-@pytest.fixture()
-def client(tmp_path):
-    os.environ["DL_DATA_DIR"] = str(tmp_path)
-    import app.db
-    import app.main
-
-    importlib.reload(app.db)
-    main = importlib.reload(app.main)
-    with TestClient(main.app) as c:
-        yield c
-
 
 def _answer_for(client, cid):
     return client.get(f"/api/card/{cid}").json()["question"]["answer"]
@@ -30,7 +12,9 @@ def _answer_for(client, cid):
 
 def test_bootstrap_carries_everything_needed_offline(client):
     b = client.get("/api/bootstrap").json()
-    assert len(b["states"]) == 1896
+    # states 只含答過的卡（惰性建列）。前端把「沒列出的」一律當 unlearned，
+    # 所以全新帳號的 bootstrap 是空的，而不是 1896 筆全預設值。
+    assert b["states"] == []
     assert {d["deck"] for d in b["decks"]} == {"car", "moto"}
     assert [d["url"] for d in b["decks"]] == ["/data/car.json", "/data/moto.json"]
     # 前端要靠 params 自己跑排程，缺一個就算不出下次複習時間
@@ -140,9 +124,13 @@ def test_failed_events_are_reported_not_silently_dropped(client):
 
 
 def test_sync_with_nothing_pending_is_just_a_refresh(client):
+    client.post("/api/sync", json={"answers": [
+        {"card_id": "C0001", "chosen": 1, "client_event_id": "x1"},
+    ]})
     r = client.post("/api/sync", json={}).json()
     assert r["sync"] == {"applied": [], "skipped": [], "failed": []}
-    assert len(r["states"]) == 1896
+    # 空同步不會動到任何狀態，但仍要把權威快照整份帶回來
+    assert [s["id"] for s in r["states"]] == ["C0001"]
 
 
 def test_service_worker_is_served_from_root(client):

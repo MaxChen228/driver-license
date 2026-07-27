@@ -1,22 +1,12 @@
 """API 端到端測試。用臨時 DL_DATA_DIR，不碰真實進度。"""
 
-import importlib
-import os
-
 import pytest
-from fastapi.testclient import TestClient
 
 
 @pytest.fixture(scope="module")
-def client(tmp_path_factory):
-    os.environ["DL_DATA_DIR"] = str(tmp_path_factory.mktemp("dl"))
-    import app.db
-    import app.main
-
-    importlib.reload(app.db)
-    main = importlib.reload(app.main)
-    with TestClient(main.app) as c:
-        yield c
+def client(module_client):
+    """本檔的測試刻意共用一份 DB，前面答過的題會影響後面的計數。"""
+    return module_client
 
 
 def test_decks_seeded_with_full_bank(client):
