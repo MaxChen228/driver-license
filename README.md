@@ -2,7 +2,15 @@
 
 台灣汽機車駕照筆試刷題 app。題庫從監理所公告 PDF 抽出，複習排程移植自 `~/project/kg` 的 flash card system。
 
-部署在 felix 常駐機、走 Tailscale 內網：**http://100.118.39.104:8006**（tailnet only，無對外）。
+部署在 felix 常駐機，對外兩條路：
+
+| 入口 | 網址 | 誰看得到 |
+|---|---|---|
+| Cloudflare Tunnel | https://drive.wordnexus.lol | 公網 |
+| tailscale serve | https://s-macbook-air.tail8c391d.ts.net | tailnet |
+
+兩條都終結在 `127.0.0.1:8006`。**這推翻了本專案早期「tailnet 即邊界、無認證、
+絕不掛 Cloudflare Tunnel」的決定** —— 邊界改由 app 自己守（見「身分模型」）。
 
 ## 題庫
 
@@ -55,15 +63,54 @@ next = clamp(base × (答對 ? 2.5 : 0.5), min, max)
 
 ```bash
 uv sync
-uv run pytest                                              # SRS + API
-uv run uvicorn app.main:app --host 127.0.0.1 --port 8006   # 本機
+uv run pytest                 # SRS + API + 帳號 + 遷移 + 跨裝置收斂
+bash deploy/run-server.sh     # 本機（沒有 secrets 檔就是開發模式）
 ```
+
+### 環境變數
+
+| 變數 | 預設 | 作用 |
+|---|---|---|
+| `DL_DATA_DIR` | `~/driver-license-data` | 進度 DB 的位置 |
+| `DL_ENV` | `dev` | `prod` 會關掉 `/api/docs` **與 `/openapi.json`** |
+| `DL_SECRETS_FILE` | `~/.secrets/driver-license.env` | 上面這些的來源，不進 repo |
+| `DL_TURNSTILE_SITEKEY` / `_SECRET` | 未設 | 兩個都設才啟用註冊的人機驗證。**只設 secret 會讓所有註冊拿到 400** |
+| `DL_LEGACY_USERNAME` | `max` | v1→v2 遷移時，既有進度掛到哪個帳號名下 |
+
+啟動時會往 stderr 印一行 `driver-license: env=… docs=… turnstile=…`。
+secrets 檔漏了或 `DL_ENV` 打錯，就靠這行看出來。
+
+## 身分模型
+
+兩種，刻意的：
+
+- **匿名**（預設）—— 題庫、SRS、狀態全部在瀏覽器的 IndexedDB 裡，伺服器一列都不寫。
+  公網上的未認證流量因此碰不到 DB。代價是清除瀏覽資料就沒了（設定頁可匯出 JSON）。
+- **帳號** —— 只為了跨裝置同步而存在。username + 密碼，**沒有 email**；
+  救援碼在註冊時顯示一次，那是忘記密碼時唯一的後路。
+
+自建而不接 Google 的理由：PWA 裡的 OAuth 轉址在 iOS 上會離開 standalone 情境，
+回來時不一定回得到原本那個 app。表單登入沒有轉址，CSP 也就能維持 `default-src 'self'`。
+
+### 認領遷移過來的進度
+
+v1→v2 遷移建出來的帳號 `password_hash` 是 NULL，**沒有任何 HTTP 端點能設定它**
+（註冊端點會拒絕已存在的帳號）。第一次部署後必須跑一次：
+
+```bash
+uv run python tools/useradmin.py list
+uv run python tools/useradmin.py set-password max
+```
+
+沒跑這一步，舊進度就是沒有人登得進去。
 
 進度 DB 在 **repo 外**（`$DL_DATA_DIR`，預設 `~/driver-license-data/app.db`），`git pull` / `reset` 不會動到 —— 但**服務啟動時會就地遷移它**，見下。
 
 ## 資料庫版本
 
-`PRAGMA user_version` 記 schema 版本，目前是 **2**（多租戶：每列都掛 `user_id`）。
+`PRAGMA user_version` 記 schema 版本，目前是 **3**。
+v2 = 多租戶（每列都掛 `user_id`）、v3 = `review_event` 記下作答當下的 preset
+（重算歷史時要用「當時」的參數，否則換一次 preset 就會把過去追溯改寫）。
 `app.main` 一被 import 就跑 `db.init()`，需要時就地遷移，**不可逆**（v1 的舊表會被 drop）。
 認不得的版本會直接拒絕開啟，不會靜默蓋章。
 
@@ -90,4 +137,36 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8006/api/decks   # 應
 - 改 `static/*`、`data/*` → 免重啟（StaticFiles / 啟動時載入的除外，改 JSON 仍需重啟）
 - 改 `deploy/*.plist` → `cp` 到 `~/Library/LaunchAgents/` 後 **`bootout` 再 `bootstrap`**（`kickstart` 不重讀 plist；`bootout` 是非同步，太快 bootstrap 會 `I/O error 5`）
 
-綁 `100.118.39.104:8006`，**不要**綁 `0.0.0.0`。tailnet 即邊界，無認證，**絕不掛 Cloudflare Tunnel**。
+綁 `127.0.0.1:8006`，**不要**綁 `0.0.0.0` 或 `100.x`。唯一的入口是前面那兩個反向代理，
+可路由介面上不該有任何開放埠。
+
+**不要加 `--proxy-headers`**：uvicorn 的 ProxyHeadersMiddleware 會直接改寫
+`scope["client"]`，於是 `ratelimit.client_ip` 那道「peer 是 loopback 才信任代理標頭」
+的閘永遠不成立（實測帶 `X-Forwarded-For: 9.9.9.9` 時 `request.client.host` 就變成
+`9.9.9.9`）。保持 peer 是真實的 `127.0.0.1`，代理標頭的信任由我們自己判。
+
+## Cloudflare（公網那條路）
+
+走既有的 `kg-standby` tunnel，設定步驟見 `~/butler/docs/cloudflare-tunnel-hosting.md` §5。
+本專案要的是：ingress `drive.wordnexus.lol → http://localhost:8006`，DNS proxied CNAME。
+
+**zone 設定必須確認關閉**，這四項是 CF 上 PWA 最常見的災難來源：
+
+| 設定 | 為什麼 |
+|---|---|
+| Rocket Loader | 會重排 script 的執行順序，打壞原生 ESM module 載入 |
+| Email Obfuscation | 往 HTML 注入 script，違反 `script-src 'self'` |
+| Bot Fight Mode | 對 HTML 注入 JS 挑戰，打壞 PWA 導覽與 service worker |
+| Mirage | 改寫 img，與 immutable 的題目圖互相打架 |
+
+快取由源站的 `cache-control` 決定，不需要 Page Rule：
+`/images/*` 與帶對版號的 `/data/*.json` 是 `immutable`（一年），其餘一律 `no-cache`。
+
+### 驗證
+
+```bash
+curl -sI https://drive.wordnexus.lol/images/car/C0001_1.png | grep -i cache-control   # immutable
+curl -s -o /dev/null -w '%{http_code}\n' https://drive.wordnexus.lol/api/state       # 401
+curl -s -o /dev/null -w '%{http_code}\n' https://drive.wordnexus.lol/openapi.json    # 404（prod）
+curl -s -o /dev/null -w '%{http_code}\n' https://drive.wordnexus.lol/privacy         # 200
+```

@@ -178,3 +178,39 @@ def test_service_worker_shell_list_matches_disk(client):
     assert "/static/style.css" in urls and "/static/fonts/archivo-latin.woff2" in urls
     for u in urls:
         assert client.get(u).status_code == 200, u
+
+
+def test_bank_and_images_are_cacheable_at_the_edge(client):
+    """公網上這是主要的頻寬防線。
+
+    354 張圖 1.8 MB + 1.5 MB 題庫，每個新訪客都回原站的話走的是家用上行。
+    原本 /images 也被強制 no-cache（那是為 app shell 訂的規則），CF 邊緣因此
+    一張都不會替我們擋。
+    """
+    img = client.get("/images/car/C0001_1.png")
+    assert img.status_code == 200
+    assert img.headers["cache-control"] == "public, max-age=31536000, immutable"
+
+    version = next(
+        d["version"] for d in client.get("/api/config").json()["decks"] if d["deck"] == "car"
+    )
+    ok = client.get("/data/car.json", params={"v": version})
+    assert ok.headers["cache-control"] == "public, max-age=31536000, immutable"
+
+
+def test_a_wrong_bank_version_is_never_given_a_long_cache(client):
+    """版號對不上就退回 no-cache。
+
+    給錯的內容長快取，等於在邊緣種一份永遠清不掉的錯誤 —— 而 ?v= 是誰都能填的。
+    """
+    for bad in [{}, {"v": "nonsense"}, {"v": "115.5.28"}]:
+        r = client.get("/data/car.json", params=bad)
+        assert r.status_code == 200
+        assert r.headers["cache-control"] == "no-cache", bad
+
+
+def test_app_shell_stays_no_cache(client):
+    """殼刻意不吃這一套。commit 21ec7ce 記錄過「新 shell 配舊 CSS」的實際事故，
+    離線由 SW 負責，這裡不為了省流量退讓。"""
+    for path in ["/", "/static/app.js", "/static/style.css", "/sw.js"]:
+        assert client.get(path).headers["cache-control"] == "no-cache", path

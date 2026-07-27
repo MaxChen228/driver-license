@@ -398,3 +398,16 @@ def test_expired_sessions_are_cleaned_up_on_login(client, tmp_path):
         "SELECT token_sha256 FROM session"
     ).fetchall()
     assert "dead" not in [r[0] for r in left]
+
+
+def test_privacy_page_is_public_and_carries_no_inline_styles(anon_client):
+    """未登入的人也要看得到「你收了我什麼」。
+
+    而且它自己不能違反 CSP —— 內聯 style 屬性會被 style-src 擋掉（style-src-attr
+    fallback 到它），版面會歪掉而且沒有錯誤訊息。
+    """
+    r = anon_client.get("/privacy")
+    assert r.status_code == 200
+    assert "style=" not in r.text
+    assert "<script" not in r.text
+    assert "email" not in r.text.lower() or "沒有 email" in r.text

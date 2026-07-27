@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from typing import Annotated
 
@@ -969,6 +969,26 @@ def put_settings(payload: SettingsIn, user: sqlite3.Row = CurrentUser):
 # ---------------------------------------------------------------- static
 
 
+IMMUTABLE = "public, max-age=31536000, immutable"
+
+
+class _Images(StaticFiles):
+    """題目圖：一年、immutable。
+
+    檔名是題號（C0001_1.png），內容綁定題號、不會就地改版 —— 題庫改版是換一份
+    JSON，圖檔要嘛沿用、要嘛換名字，所以「同一個網址的內容永遠不變」是成立的。
+
+    這件事在公網上的份量與內網完全不同：354 張圖 1.8 MB，每個新訪客都回原站的話
+    走的是家用上行。給了 immutable，CF 邊緣才擋得下來。
+    """
+
+    async def get_response(self, path, scope):
+        resp = await super().get_response(path, scope)
+        if resp.status_code == 200:
+            resp.headers["cache-control"] = IMMUTABLE
+        return resp
+
+
 class _Static(StaticFiles):
     """StaticFiles 加上明確的 cache-control: no-cache。
 
@@ -991,21 +1011,27 @@ class _Static(StaticFiles):
         return resp
 
 
-app.mount("/images", _Static(directory=DATA_DIR / "images"), name="images")
+app.mount("/images", _Images(directory=DATA_DIR / "images"), name="images")
 app.mount("/static", _Static(directory=ROOT / "static"), name="static")
 
 
 @app.get("/data/{deck}.json")
-def deck_json(deck: str):
+def deck_json(deck: str, v: str | None = None):
     """整份題庫。service worker 預先快取這個 URL，離線時題目直接從 Cache Storage 讀。
 
     兩份加起來 1.5 MB、gzip 後 179 KB —— 整包收進手機是零負擔的。
+
+    版號對得上才給長快取：網址由 /api/config 產生（?v=<source.version>），
+    題庫改版就換網址，所以「同一個網址的內容永遠不變」成立，immutable 是誠實的。
+    對不上（有人自己亂填或省略）就退回 no-cache —— 給錯的東西長快取，
+    等於在邊緣種下一份永遠清不掉的錯誤內容。
     """
-    _deck_or_404(deck)
+    d = _deck_or_404(deck)
+    fresh = IMMUTABLE if v == d.version else "no-cache"
     return FileResponse(
         DATA_DIR / f"{deck}_questions.json",
         media_type="application/json",
-        headers={"cache-control": "no-cache"},  # 由 SW 管快取，瀏覽器別自己壓一層舊的
+        headers={"cache-control": fresh},
     )
 
 
@@ -1039,9 +1065,54 @@ def web_manifest():
     )
 
 
+@app.get("/privacy")
+def privacy():
+    """這個 app 收了什麼、沒收什麼。
+
+    沒有 email、沒有分析、沒有第三方 script（Turnstile 沒啟用時 CSP 連
+    default-src 'self' 都沒放寬）。所以這頁很短 —— 短是重點，不是偷懶。
+    """
+    return HTMLResponse(
+        PRIVACY_HTML, headers={"cache-control": "no-cache"}
+    )
+
+
 @app.get("/favicon.ico")
 def favicon():
     return Response(status_code=204)
+
+
+PRIVACY_HTML = """<!doctype html>
+<html lang="zh-Hant"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>資料說明 · 駕照筆試</title>
+<link rel="stylesheet" href="/static/style.css">
+</head><body><main class="shell prose">
+<h1>資料說明</h1>
+
+<h2>不登入時</h2>
+<p>你的作答紀錄<b>完全不會離開這台裝置</b>。題庫與排程都在瀏覽器裡跑，
+伺服器一列資料都不會寫。代價是清除瀏覽資料就會消失 —— 設定頁可以匯出備份。</p>
+
+<h2>登入之後</h2>
+<p>只為了跨裝置同步而存在。伺服器會存：帳號名稱、密碼的雜湊（Argon2id，
+無法還原成密碼）、救援碼的雜湊、你的作答紀錄與筆記、以及登入時的 IP 與瀏覽器
+字串（用來讓你辨認自己的登入）。</p>
+
+<h2>沒有收的東西</h2>
+<p>沒有 email、沒有真實姓名、沒有電話。沒有分析工具、沒有廣告、沒有追蹤碼，
+也沒有任何第三方 script。</p>
+
+<h2>刪除</h2>
+<p>設定頁的「刪除帳號」會把上述所有資料一次刪除，不保留備份中的副本以外的東西
+（異地備份最多保留 14 天後自然輪替掉）。</p>
+
+<h2>其他</h2>
+<p>網站經 Cloudflare 代理，因此 Cloudflare 會依其自身政策記錄存取紀錄。
+題庫內容取自交通部公路局公開發布的筆試題庫 PDF。</p>
+
+<p><a href="/">← 回到 app</a></p>
+</main></body></html>"""
 
 
 @app.get("/")

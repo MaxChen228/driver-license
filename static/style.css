@@ -665,3 +665,6 @@ main {
   padding: var(--space-3); border: 1px solid var(--line); }
 .recovery code { font-size: 1.1rem; letter-spacing: .06em; word-break: break-all; }
 .recovery span { color: var(--muted); font-size: .85rem; }
+
+.prose { max-width: 40rem; }
+.prose h2 { margin-top: var(--space-4); }
