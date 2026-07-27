@@ -6,7 +6,11 @@
 // 而且 iOS Safari 在儲存壓力下清得比 IndexedDB 積極。作答紀錄不能被清掉。
 
 const DB_NAME = "driver-license";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
+
+// 保留上限。一題約 120 bytes，兩萬筆約 2.4 MB —— 遠低於任何瀏覽器的配額，
+// 但有個上限總比沒有好：這是唯一會單調成長的東西。
+const EVENTS_MAX = 20000;
 
 let dbp = null;
 
@@ -14,11 +18,28 @@ function open() {
   if (dbp) return dbp;
   dbp = new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
+    req.onupgradeneeded = (e) => {
       const db = req.result;
       if (!db.objectStoreNames.contains("kv")) db.createObjectStore("kv");
       if (!db.objectStoreNames.contains("outbox")) {
         db.createObjectStore("outbox", { keyPath: "client_event_id" });
+      }
+      // v2：events 是「這台裝置的完整作答歷史」，跟 outbox 是兩回事 ——
+      // outbox 送出去就清掉，events 永遠留著。登入時要把歷史併進帳號、
+      // 匿名時要算正確率與連續天數，靠的都是它。
+      if (!db.objectStoreNames.contains("events")) {
+        db.createObjectStore("events", { keyPath: "client_event_id" });
+        // 升級前那些還沒送出去的，是這台裝置僅有的歷史，不能丟
+        if (e.oldVersion >= 1) {
+          const tx = req.transaction;
+          const evs = tx.objectStore("events");
+          tx.objectStore("outbox").openCursor().onsuccess = (ev) => {
+            const cur = ev.target.result;
+            if (!cur) return;
+            evs.put(cur.value);
+            cur.continue();
+          };
+        }
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -42,6 +63,38 @@ const kvGet = (k) => tx("kv", "readonly", (s) => s.get(k));
 const kvPut = (k, v) => tx("kv", "readwrite", (s) => s.put(v, k));
 
 const outboxAll = () => tx("outbox", "readonly", (s) => s.getAll());
+const kvDelete = (k) => tx("kv", "readwrite", (s) => s.delete(k));
+
+const eventsAll = () => tx("events", "readonly", (s) => s.getAll());
+const eventsGet = (id) => tx("events", "readonly", (s) => s.get(id));
+const eventsCount = () => tx("events", "readonly", (s) => s.count());
+
+async function eventsPut(ev) {
+  await tx("events", "readwrite", (s) => s.put(ev));
+  // client_event_id 以時間戳當前綴，所以 key 順序就是時間順序 ——
+  // 修剪時從最舊的那頭刪即可，不必先全部讀出來排序。
+  const n = await eventsCount();
+  if (n <= EVENTS_MAX) return;
+  await tx("events", "readwrite", (s) => {
+    let left = n - EVENTS_MAX;
+    s.openCursor().onsuccess = (e) => {
+      const cur = e.target.result;
+      if (!cur || left-- <= 0) return;
+      cur.delete();
+      cur.continue();
+    };
+  });
+}
+
+async function clearAll() {
+  const db = await open();
+  return new Promise((resolve, reject) => {
+    const t = db.transaction(["kv", "outbox", "events"], "readwrite");
+    ["kv", "outbox", "events"].forEach((n) => t.objectStore(n).clear());
+    t.oncomplete = resolve;
+    t.onerror = () => reject(t.error);
+  });
+}
 const outboxPut = (ev) => tx("outbox", "readwrite", (s) => s.put(ev));
 const outboxDelete = (id) => tx("outbox", "readwrite", (s) => s.delete(id));
 const outboxCount = () => tx("outbox", "readonly", (s) => s.count());
@@ -68,7 +121,8 @@ async function requestPersistence() {
 }
 
 export {
-  kvGet, kvPut,
+  kvGet, kvPut, kvDelete,
   outboxAll, outboxPut, outboxDelete, outboxCount, outboxGet, outboxRemoveMany,
-  requestPersistence,
+  eventsAll, eventsGet, eventsPut, eventsCount,
+  clearAll, requestPersistence,
 };

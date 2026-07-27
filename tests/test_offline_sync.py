@@ -10,18 +10,30 @@ def _answer_for(client, cid):
     return client.get(f"/api/card/{cid}").json()["question"]["answer"]
 
 
-def test_bootstrap_carries_everything_needed_offline(client):
-    b = client.get("/api/bootstrap").json()
+def test_state_carries_only_this_account(client):
+    b = client.get("/api/state").json()
     # states 只含答過的卡（惰性建列）。前端把「沒列出的」一律當 unlearned，
-    # 所以全新帳號的 bootstrap 是空的，而不是 1896 筆全預設值。
+    # 所以全新帳號是空的，而不是 1896 筆全預設值。
     assert b["states"] == []
+    assert b["notes"] == {}
+    assert b["preset"] == "relaxed" and b["paused"] is False
+    # 題庫目錄不在這裡 —— 那是對所有人都一樣的東西，歸 /api/config
+    assert "decks" not in b
+
+
+def test_config_is_public_and_carries_the_bank_catalogue(anon_client):
+    """匿名使用者要能完整刷題，所以這份必須不需要身分。"""
+    c = anon_client.get("/api/config")
+    assert c.status_code == 200
+    b = c.json()
     assert {d["deck"] for d in b["decks"]} == {"car", "moto"}
-    assert [d["url"] for d in b["decks"]] == ["/data/car.json", "/data/moto.json"]
-    # 前端要靠 params 自己跑排程，缺一個就算不出下次複習時間
-    assert set(b["params"]) == {
-        "initial_hours", "remembered_mult", "forgot_mult", "min_hours", "max_hours"
-    }
-    assert b["params"]["initial_hours"] == 24.0
+    assert b["presets"] == ["relaxed", "intensive"]
+    assert b["default_preset"] == "relaxed"
+    # 版號進 URL：題庫換版才換網址，邊緣與瀏覽器才能長期快取又不會拿到舊的
+    urls = {d["deck"]: d["url"] for d in b["decks"]}
+    assert urls["car"].startswith("/data/car.json?v=")
+    # SRS 參數刻意不在這裡：那些由 static/srs.js 自帶，parity 測試釘住兩邊一致
+    assert "params" not in b
 
 
 def test_deck_json_is_served_for_precache(client):
@@ -139,3 +151,24 @@ def test_service_worker_is_served_from_root(client):
     assert r.status_code == 200
     assert "javascript" in r.headers["content-type"]
     assert client.get("/manifest.webmanifest").status_code == 200
+
+
+def test_the_whole_offline_shell_is_reachable_without_a_session(anon_client):
+    """匿名使用者要能完整刷題，所以 SW 預先快取的每一個 URL 都必須不需要身分。
+
+    少一個檔案 addAll() 會整批失敗（規格如此），SW 永遠裝不起來、離線功能靜靜
+    失效。而 401 在這裡跟 404 一樣致命 —— 只是更難想到。
+    """
+    import re
+
+    sw = anon_client.get("/sw.js")
+    assert sw.status_code == 200
+    shell = re.search(r"const SHELL = \[(.*?)\];", sw.text, re.S).group(1)
+    urls = re.findall(r'"([^"]+)"', shell)
+    assert "/api/config" in urls  # 沒有它就不知道要載哪幾份題庫
+    for u in urls:
+        assert anon_client.get(u).status_code == 200, u
+
+    # 題庫本身（SW 另外預先快取 BANKS，不在 SHELL 裡）
+    for d in anon_client.get("/api/config").json()["decks"]:
+        assert anon_client.get(d["url"]).status_code == 200, d["url"]

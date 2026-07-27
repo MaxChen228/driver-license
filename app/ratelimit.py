@@ -48,11 +48,19 @@ class Limiter:
     _buckets: dict[str, _Bucket] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
+    # 字典是攻擊者能間接控制大小的東西，所以要有上限。滿了就把最舊的那批丟掉：
+    # 被丟掉的等於重新獲得配額，但要撐滿這個上限本身就得先通過 IP 維度的限流。
+    MAX_KEYS = 50_000
+
     def check(self, key: str) -> float:
         """回傳 0 表示放行；否則回傳「還要等幾秒」。"""
         rate = self.capacity / self.per_seconds
         now = time.monotonic()
         with self._lock:
+            if len(self._buckets) >= self.MAX_KEYS:
+                stale = sorted(self._buckets.items(), key=lambda kv: kv[1].updated)
+                for k, _ in stale[: self.MAX_KEYS // 4]:
+                    del self._buckets[k]
             b = self._buckets.get(key)
             if b is None:
                 self._buckets[key] = _Bucket(self.capacity - 1, now)

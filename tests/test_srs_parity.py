@@ -123,3 +123,34 @@ def test_js_and_python_derive_state_agree(tmp_path):
         srs.derive_state(c, datetime.fromisoformat(n) if n else None, now) for c, n in cases
     ]
     assert js == py
+
+
+def test_presets_match_python(tmp_path):
+    """匿名模式的 SRS 參數只能來自 static/srs.js —— 沒有伺服器可問。
+
+    所以那份常數就是唯一來源，而它必須跟 app/srs.py 一個小數位都不差。
+    差一點點不會壞掉，只會讓同一個人在登入前後拿到不同的複習時間。
+    """
+    harness = tmp_path / "presets.mjs"
+    shutil.copy(ROOT / "static" / "srs.js", tmp_path / "srs.mjs")
+    harness.write_text(
+        "import * as srs from './srs.mjs';\n"
+        "console.log(JSON.stringify({presets: srs.PRESETS, dflt: srs.DEFAULT_PRESET}));\n",
+        encoding="utf-8",
+    )
+    out = subprocess.run(
+        [NODE, str(harness)], capture_output=True, text=True, check=True, cwd=tmp_path
+    )
+    got = json.loads(out.stdout)
+
+    assert got["dflt"] == srs.DEFAULT_PRESET
+    assert set(got["presets"]) == set(srs.PRESETS)
+    for name, cfg in srs.PRESETS.items():
+        js = got["presets"][name]
+        assert js == {
+            "initial_hours": cfg.initial_hours,
+            "remembered_mult": cfg.remembered_mult,
+            "forgot_mult": cfg.forgot_mult,
+            "min_hours": cfg.min_hours,
+            "max_hours": cfg.max_hours,
+        }, name

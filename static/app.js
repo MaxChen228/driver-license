@@ -12,8 +12,13 @@ import * as store from "./store.js";
 
 const $ = (s) => document.querySelector(s);
 
+// X-DL-Client 讓任何跨站的表單／img 式偽造直接死在伺服器的 middleware：
+// 自訂標頭會觸發 preflight，而我們不回應 preflight。
 const api = async (path, opts) => {
-  const r = await fetch(path, { headers: { "content-type": "application/json" }, ...opts });
+  const r = await fetch(path, {
+    headers: { "content-type": "application/json", "x-dl-client": "1" },
+    ...opts,
+  });
   if (!r.ok) throw new Error(`${r.status} ${path}`);
   return r.json();
 };
@@ -24,35 +29,73 @@ const TITLES = {
   browse: "題庫", stats: "統計", settings: "設定",
 };
 
-let SNAP = null;    // 伺服器快照：params / paused / decks / states(Map) / notes(Map)
 let BANK = {};      // deck → { questions, byId, categories, label, title, version }
+let CONFIG = null;  // /api/config：題庫目錄，對所有人都一樣，可長期快取
+let SNAP = null;    // 使用者狀態：preset / paused / states(Map) / notes(Map)
+let MODE = "local"; // "local" = 匿名純本機；"account" = 已登入，伺服器是權威
+let ME = null;      // 登入中的帳號（未登入為 null）
 let S = null;       // 目前 session
 let syncing = false;
 
+const params = () => srs.params(SNAP.preset);
+const signedIn = () => MODE === "account";
+
 // ── 開機 ──────────────────────────────────────────────
+// 順序是重點：題庫與設定檔先到位，app 就能用了。身分是之後的事，
+// 而且失敗不影響刷題 —— 匿名模式本來就不需要伺服器。
 async function boot() {
   registerSW();
   store.requestPersistence();
 
-  const cached = await store.kvGet("snapshot");
   try {
-    // 有網路就拿權威快照（順便把 outbox 補送掉）；沒網路就用上次存的
-    SNAP = adopt(await sync({ silent: true }));
+    CONFIG = await loadConfig();
   } catch {
-    if (!cached) return bootFail();
-    SNAP = adopt(cached);
+    return bootFail();
   }
-
   try {
-    BANK = await loadBanks(SNAP.decks);
+    BANK = await loadBanks(CONFIG.decks);
   } catch {
     return bootFail();
   }
 
+  MODE = (await store.kvGet("mode")) || "local";
+  SNAP = adopt((await store.kvGet("snapshot")) || emptySnapshot());
+
+  if (signedIn()) {
+    try {
+      ME = await api("/api/me");
+      SNAP = adopt(await sync({ silent: true }));
+      await replayPending();
+    } catch (e) {
+      // 401 = session 過期。切回本機繼續用，不清資料 —— 只有明確登出才清。
+      if (String(e.message).startsWith("401")) await goLocal();
+    }
+  }
+
   $("#boot").hidden = true;
-  await replayPending();       // outbox 裡還沒送出去的，疊回權威狀態上
   paintNet();
   renderHome();
+}
+
+function emptySnapshot() {
+  return {
+    preset: (CONFIG && CONFIG.default_preset) || srs.DEFAULT_PRESET,
+    paused: false, paused_at: null, states: [], notes: {},
+  };
+}
+
+// 設定檔：有網路就更新，沒網路就用上次存的。service worker 也預先快取了它，
+// 所以第一次以外的離線開機都拿得到。
+async function loadConfig() {
+  try {
+    const c = await api("/api/config");
+    await store.kvPut("config", c);
+    return c;
+  } catch {
+    const cached = await store.kvGet("config");
+    if (cached) return cached;
+    throw new Error("no config");
+  }
 }
 
 function bootFail() {
@@ -87,7 +130,8 @@ async function loadBanks(decks) {
 function adopt(payload) {
   return {
     ...payload,
-    states: new Map(payload.states.map((s) => [s.id, s])),
+    preset: payload.preset || srs.DEFAULT_PRESET,
+    states: new Map((payload.states || []).map((s) => [s.id, s])),
     notes: new Map(Object.entries(payload.notes || {})),
   };
 }
@@ -119,10 +163,10 @@ function eventId() {
 
 async function sync({ silent = false } = {}) {
   const answers = await store.outboxAll();
-  const notes = (await store.kvGet("notes_dirty")) || {};
+  const dirty = (await store.kvGet("notes_dirty")) || {};
   const res = await api("/api/sync", {
     method: "POST",
-    body: JSON.stringify({ answers, notes }),
+    body: JSON.stringify({ answers, notes: dirty }),
   });
 
   // applied 與 skipped 都代表「伺服器已經有了」；failed 是永久性失敗（例如題號不存在），
@@ -132,19 +176,25 @@ async function sync({ silent = false } = {}) {
   await store.outboxRemoveMany([
     ...applied, ...skipped, ...failed.map((f) => f.client_event_id),
   ]);
-  await store.kvPut("notes_dirty", {});
+  // 只刪這次真的送出去的那幾把 key。整包清掉的話，POST 進行中寫的筆記會被吃掉，
+  // 而且完全沒有跡象 —— outbox 那邊本來就只刪伺服器確認過的，這裡跟它一致。
+  const still = (await store.kvGet("notes_dirty")) || {};
+  for (const k of Object.keys(dirty)) if (still[k] === dirty[k]) delete still[k];
+  await store.kvPut("notes_dirty", still);
+
   if (!silent) paintNet();
   return res;
 }
 
 async function syncSoon() {
-  if (syncing || !navigator.onLine) return paintNet();
+  if (!signedIn() || syncing || !navigator.onLine) return paintNet();
   syncing = true;
   try {
     SNAP = adopt(await sync());
     await replayPending();
-  } catch {
-    // 送不出去就留在 outbox，下次上線或重新開啟再說
+  } catch (e) {
+    if (String(e.message).startsWith("401")) await goLocal();
+    // 其餘（送不出去）就留在 outbox，下次上線或重新開啟再說
   } finally {
     syncing = false;
     await persist();
@@ -152,9 +202,18 @@ async function syncSoon() {
   }
 }
 
+// 登入失效時退回本機模式。刻意不清資料：使用者沒有要求登出，
+// 手上的進度是他的，只是暫時沒有伺服器可同步而已。
+async function goLocal() {
+  MODE = "local";
+  ME = null;
+  await store.kvPut("mode", "local");
+  if (typeof renderSettings === "function" && !$("#view-settings").hidden) renderSettings();
+}
+
 // 把 outbox 裡尚未確認的事件重新疊到權威狀態上。
-// 沒有這一步的話：同步進行中使用者又答了一題，伺服器回來的快照不含那一題，
-// 本地狀態就會倒退回去。
+// 只在「剛採用伺服器回應」之後呼叫 —— 對著本機快照再疊一次會重複套用，
+// 因為 persist() 存下來的 SNAP 已經含了那些作答的效果。
 async function replayPending() {
   for (const ev of await store.outboxAll()) {
     const q = question(ev.card_id);
@@ -164,7 +223,7 @@ async function replayPending() {
       ev.card_id,
       {
         id: ev.card_id, deck: q.deck,
-        ...srs.applyFeedback(SNAP.states.get(ev.card_id), remembered, SNAP.params,
+        ...srs.applyFeedback(SNAP.states.get(ev.card_id), remembered, params(),
                              new Date(ev.reviewed_at)),
       }
     );
@@ -173,8 +232,14 @@ async function replayPending() {
 }
 
 async function paintNet() {
-  const pending = await store.outboxCount();
   const dot = $("#netdot");
+  if (!signedIn()) {          // 匿名：沒有「待送」這回事，伺服器一列都不寫
+    dot.hidden = navigator.onLine;
+    dot.className = "tag off";
+    dot.textContent = "離線";
+    return;
+  }
+  const pending = await store.outboxCount();
   if (!navigator.onLine) {
     dot.hidden = false;
     dot.className = "tag off";
@@ -240,7 +305,7 @@ function shuffled(a) {
 // ── 首頁 ──────────────────────────────────────────────
 function renderHome() {
   $("#view-home").innerHTML =
-    SNAP.decks.map((d) => deckCard(d, counts(d.deck))).join("") +
+    CONFIG.decks.map((d) => deckCard(d, counts(d.deck))).join("") +
     (SNAP.paused
       ? `<p class="home-note tag tag-accent">${ico("pause", "ico ico-sm")}時鐘已凍結 —— 到期時間不會推進</p>`
       : "");
@@ -357,7 +422,7 @@ async function submit(chosen, guessed = false) {
   const remembered = correct && !guessed;
   const before = SNAP.states.get(q.id);
   const now = refNow();
-  const after = srs.applyFeedback(before, remembered, SNAP.params, now);
+  const after = srs.applyFeedback(before, remembered, params(), now);
 
   SNAP.states.set(q.id, { id: q.id, deck: q.deck, ...after });
 
@@ -369,7 +434,11 @@ async function submit(chosen, guessed = false) {
     elapsed_ms: Math.round(performance.now() - S.t0),
     reviewed_at: new Date().toISOString(),   // 真實牆鐘時間，供熱力圖與補送排序
   };
-  await store.outboxPut(ev);
+  // events 是這台裝置的完整歷史，兩種模式都寫、永遠留著（登入時要拿它併進帳號，
+  // 匿名時要拿它算正確率與連續天數）。outbox 只是待補送佇列，匿名模式不寫 ——
+  // 「匿名」的定義就是伺服器一列都不寫。
+  await store.eventsPut(ev);
+  if (signedIn()) await store.outboxPut(ev);
   await persist();
 
   S.chosen = chosen;
@@ -408,13 +477,18 @@ function paintVerdict(r, chosen) {
 $("#btn-guessed").addEventListener("click", async () => {
   if (!S || !S.answered) return;
   const q = question(S.cardId);
-  const pending = await store.outboxGet(S.eventId);
+  // 匿名模式沒有 outbox，那一筆永遠只在本地 —— 一律走本地重算這條路。
+  const pending = signedIn() ? await store.outboxGet(S.eventId) : true;
 
   if (pending) {
-    // 還沒送出去 —— 直接改 outbox 裡那筆，並用當初的 before 重算，本地就能完成
-    pending.guessed = true;
-    await store.outboxPut(pending);
-    const after = srs.applyFeedback(S.before, false, SNAP.params, S.now);
+    // 還沒送出去 —— 直接改本地那筆，並用當初的 before 重算，不需要網路
+    const ev = await store.eventsGet(S.eventId);
+    if (ev) {
+      ev.guessed = true;
+      await store.eventsPut(ev);
+      if (signedIn()) await store.outboxPut(ev);
+    }
+    const after = srs.applyFeedback(S.before, false, params(), S.now);
     SNAP.states.set(q.id, { id: q.id, deck: q.deck, ...after });
     await persist();
     paintVerdict({ correct: true, answer: q.answer, remembered: false, ...after }, S.chosen);
@@ -479,11 +553,15 @@ $("#note").addEventListener("blur", async () => {
   if ((SNAP.notes.get(id) || "") === body) return;
 
   body ? SNAP.notes.set(id, body) : SNAP.notes.delete(id);
-  const dirty = (await store.kvGet("notes_dirty")) || {};
-  dirty[id] = body;
-  await store.kvPut("notes_dirty", dirty);
+  // 匿名模式沒有要送去哪裡，筆記就住在 SNAP 裡；登入才需要排隊補送。
+  if (signedIn()) {
+    const dirty = (await store.kvGet("notes_dirty")) || {};
+    dirty[id] = body;
+    await store.kvPut("notes_dirty", dirty);
+  }
   await persist();
-  $("#note-status").textContent = navigator.onLine ? "已儲存" : "已存在本機，連線後同步";
+  $("#note-status").textContent = !signedIn() || navigator.onLine
+    ? "已儲存" : "已存在本機，連線後同步";
   syncSoon();
 });
 
@@ -562,28 +640,29 @@ $("#br-deck").addEventListener("change", renderBrowse);
 async function renderStats() {
   fillDeckSelect("#st-deck");
   const deck = $("#st-deck").value;
+  // 登入且有網路才問伺服器。匿名模式沒有伺服器可問，但本機的事件日誌
+  // 含有完整歷史，正確率與連續天數一樣算得出來。
   let s = null;
   try {
-    if (navigator.onLine) s = await api(`/api/stats?deck=${deck}`);
+    if (signedIn() && navigator.onLine) s = await api(`/api/stats?deck=${deck}`);
   } catch { /* 離線就用本地能算的那部分 */ }
 
-  const local = localStats(deck);
+  const local = await localStats(deck);
   const forecast = s ? s.forecast_14d : local.forecast;
   const worst = s ? s.worst_categories : local.worst;
   const max = Math.max(1, ...forecast.map((f) => f.count));
 
   $("#st-body").innerHTML = `
-    <div class="sec">概況${s ? "" : `<span class="sec-note">離線 · 僅本機資料</span>`}</div>
+    <div class="sec">概況${s ? "" : `<span class="sec-note">${signedIn() ? "離線 · " : ""}本機資料</span>`}</div>
     <div class="tiles">
       <div class="tile"><b>${s ? s.answered_total : local.answered}</b><span>累計作答</span></div>
-      <div class="tile"><b>${s && s.accuracy !== null ? Math.round(s.accuracy * 100) + "%" : "—"}</b><span>正確率</span></div>
-      <div class="tile"><b>${s ? s.streak_days : "—"}</b><span>連續天數</span></div>
+      <div class="tile"><b>${accuracyText(s, local)}</b><span>正確率</span></div>
+      <div class="tile"><b>${s ? s.streak_days : local.streak}</b><span>連續天數</span></div>
     </div>
-    ${s ? "" : `<p class="muted">正確率與連續天數需要伺服器上的作答紀錄。</p>`}
     <div class="sec">未來 14 天到期量<span class="sec-note">尖峰 ${max} 題</span></div>
     <div class="chart">
       <div class="bars">${forecast.map((f) =>
-        `<div class="${f.count ? "" : "empty"}" style="height:${Math.max((f.count / max) * 100, 1.5)}%" title="${f.day}：${f.count} 題"></div>`).join("")}</div>
+        `<div class="${f.count ? "" : "empty"}" data-h="${Math.max((f.count / max) * 100, 1.5)}" title="${f.day}：${f.count} 題"></div>`).join("")}</div>
     </div>
     <div class="barlabels">${forecast.map((f, i) =>
       `<span>${i % 2 ? "" : f.day.slice(8)}</span>`).join("")}</div>
@@ -595,6 +674,13 @@ async function renderStats() {
           ${ico("chevron", "ico ico-sm")}</button>`).join("")}</div>`
       : `<p class="muted">還沒有答錯紀錄。</p>`}`;
 
+  // 高度用 JS 設，不寫成 style="" 內聯屬性：CSP 的 style-src 不含 'unsafe-inline'，
+  // style-src-attr 會 fallback 到它，內聯屬性一律被擋 —— 長條圖會整排變成高度 0，
+  // 而且沒有錯誤訊息，只是圖表變成一條線。CSSOM 賦值不受 CSP 管。
+  $("#st-body").querySelectorAll("[data-h]").forEach((b) => {
+    b.style.height = `${b.dataset.h}%`;
+  });
+
   // 統計不該只能看 —— 點分類直接開一輪那個分類的複習
   $("#st-body").querySelectorAll("[data-cat]").forEach((b) =>
     b.addEventListener("click", () => startSession(deck, "all", b.dataset.cat))
@@ -602,7 +688,14 @@ async function renderStats() {
   show("stats");
 }
 
-function localStats(deck) {
+function accuracyText(server, local) {
+  if (server) return server.accuracy !== null ? Math.round(server.accuracy * 100) + "%" : "—";
+  return local.accuracy !== null ? Math.round(local.accuracy * 100) + "%" : "—";
+}
+
+// 正確率與連續天數要從事件日誌算，不能從 states 算 —— states 只有「現在的樣子」，
+// 沒有「答過幾次、對幾次、哪幾天答的」。events 兩種模式都寫，所以匿名也有得算。
+async function localStats(deck) {
   const now = refNow();
   const day0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const buckets = new Array(14).fill(0);
@@ -621,8 +714,28 @@ function localStats(deck) {
     if (idx < 14) buckets[idx] += 1;
   }
 
+  let total = 0;
+  let ok = 0;
+  const days = new Set();
+  for (const ev of await store.eventsAll()) {
+    const q = question(ev.card_id);
+    if (!q || q.deck !== deck) continue;
+    total += 1;
+    if (ev.chosen === q.answer) ok += 1;
+    // 用 UTC 日期，跟伺服器的 day_key 同一套（app/main.py 拿 UTC 的 date()）。
+    // 這裡若改用當地時區，同一個人登入前後看到的連續天數會不一樣 ——
+    // 一致比「對」更重要，而伺服器那份是權威。
+    days.add(ev.reviewed_at.slice(0, 10));
+  }
+  let streak = 0;
+  for (let d = new Date(); days.has(d.toISOString().slice(0, 10)); d.setUTCDate(d.getUTCDate() - 1)) {
+    streak += 1;
+  }
+
   return {
-    answered,
+    answered: total || answered,
+    accuracy: total ? ok / total : null,
+    streak,
     forecast: buckets.map((count, i) => ({
       day: new Date(day0.getTime() + i * 86400e3).toISOString().slice(0, 10), count,
     })),
@@ -634,8 +747,10 @@ $("#st-deck").addEventListener("change", renderStats);
 
 // ── 設定 ──────────────────────────────────────────────
 async function renderSettings() {
-  const p = SNAP.params;
-  const off = !navigator.onLine;
+  const p = params();
+  // 只有「登入 + 離線」才改不動設定：那時伺服器是權威，本地改了會跟它對不起來。
+  // 匿名模式的設定本來就住在這台裝置上，離線照樣能改。
+  const off = signedIn() && !navigator.onLine;
   $("#set-body").innerHTML = `
     <div class="set-block">
       <h3>複習節奏</h3>
@@ -645,9 +760,9 @@ async function renderSettings() {
         <div><dt>答錯</dt><dd>×${p.forgot_mult}</dd></div>
         <div><dt>範圍</dt><dd>${fmtHours(p.min_hours)}–${fmtHours(p.max_hours)}</dd></div>
       </dl>
-      <select id="set-preset" class="input" ${off ? "disabled" : ""}>${SNAP.presets.map((n) =>
+      <select id="set-preset" class="input" ${off ? "disabled" : ""}>${CONFIG.presets.map((n) =>
         `<option value="${n}" ${n === SNAP.preset ? "selected" : ""}>${n === "relaxed" ? "relaxed（寬鬆，預設）" : "intensive（密集）"}</option>`).join("")}</select>
-      ${off ? `<p class="muted" style="margin-top:var(--space-2)">離線時無法變更 —— 這是全域設定，必須由伺服器裁決。</p>` : ""}
+      ${off ? `<p class="muted set-hint">離線時無法變更 —— 登入後這是帳號設定，由伺服器裁決。</p>` : ""}
     </div>
     <div class="set-block">
       <h3>凍結時鐘</h3>
@@ -669,24 +784,42 @@ async function renderSettings() {
       <p>答錯是把間隔乘上 ${p.forgot_mult}、不是打回新卡。排到 30 天的題答錯後回到 15 天，累積的記憶強度會保留。</p>
     </div>`;
 
-  $("#set-pending").textContent = `待補送的作答：${await store.outboxCount()} 筆`;
+  $("#set-pending").textContent = signedIn()
+    ? `待補送的作答：${await store.outboxCount()} 筆`
+    : `這台裝置的作答紀錄：${await store.eventsCount()} 筆（只存在本機）`;
   $("#set-cache").textContent = await cacheReport();
-  $("#set-preset").addEventListener("change", async (e) => {
-    await api("/api/settings", { method: "PUT", body: JSON.stringify({ preset: e.target.value }) });
-    SNAP = adopt(await api("/api/bootstrap"));
-    await persist(); renderSettings();
-  });
-  $("#set-pause").addEventListener("change", async (e) => {
-    await api("/api/settings", { method: "PUT", body: JSON.stringify({ paused: e.target.checked }) });
-    SNAP = adopt(await api("/api/bootstrap"));
-    await persist(); renderSettings();
-  });
+  // 設定在兩種模式都能改。匿名時就是本機的事；登入時伺服器是權威，
+  // 改完直接採用它回傳的狀態，不要自己猜它會怎麼算（例如 paused_at）。
+  $("#set-preset").addEventListener("change", (e) => setSetting({ preset: e.target.value }));
+  $("#set-pause").addEventListener("change", (e) => setSetting({ paused: e.target.checked }));
   $("#set-precache").addEventListener("click", () => {
     navigator.serviceWorker && navigator.serviceWorker.controller &&
       navigator.serviceWorker.controller.postMessage("precache-images");
     flash($("#set-precache"), "下載中…");
   });
   show("settings");
+}
+
+async function setSetting(patch) {
+  if (signedIn()) {
+    try {
+      await api("/api/settings", { method: "PUT", body: JSON.stringify(patch) });
+      SNAP = adopt({ ...await api("/api/state") });
+    } catch (e) {
+      if (String(e.message).startsWith("401")) await goLocal();
+      else return flash($("#set-body"), "改不動，稍後再試");
+    }
+  }
+  if (!signedIn()) {
+    if (patch.preset !== undefined) SNAP.preset = patch.preset;
+    if (patch.paused !== undefined) {
+      SNAP.paused = patch.paused;
+      // 進入暫停時把當下時間凍住，之後所有到期計算都用它 —— 與 app/main.py 同一套
+      if (patch.paused) SNAP.paused_at = new Date().toISOString();
+    }
+  }
+  await persist();
+  renderSettings();
 }
 
 // 直接數 Cache Storage，不靠 service worker 回報 —— SW 只在下載當下發訊息，
@@ -734,7 +867,7 @@ function registerSW() {
 // ── 雜項 ──────────────────────────────────────────────
 function fillDeckSelect(sel) {
   if ($(sel).options.length) return;
-  $(sel).innerHTML = SNAP.decks.map((d) => `<option value="${d.deck}">${esc(d.label)}</option>`).join("");
+  $(sel).innerHTML = CONFIG.decks.map((d) => `<option value="${d.deck}">${esc(d.label)}</option>`).join("");
 }
 function esc(s) {
   return String(s ?? "").replace(/[&<>"]/g, (c) =>

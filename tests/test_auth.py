@@ -19,7 +19,7 @@ GOOD = "another-long-passphrase"
 PROTECTED = [
     ("GET", "/api/me", None),
     ("GET", "/api/decks", None),
-    ("GET", "/api/bootstrap", None),
+    ("GET", "/api/state", None),
     ("GET", "/api/settings", None),
     ("GET", "/api/stats?deck=car", None),
     ("GET", "/api/browse?deck=car", None),
@@ -63,8 +63,8 @@ def test_accounts_cannot_see_each_other(tmp_path_factory):
         a.post("/api/auth/logout")
         a.post("/api/auth/register", json={"username": "bob", "password": GOOD})
 
-        assert a.get("/api/bootstrap").json()["states"] == []
-        assert a.get("/api/bootstrap").json()["notes"] == {}
+        assert a.get("/api/state").json()["states"] == []
+        assert a.get("/api/state").json()["notes"] == {}
         assert a.get("/api/settings").json()["preset"] == "relaxed"
         assert a.get("/api/card/C0001").json()["note"] is None
         assert a.get("/api/stats", params={"deck": "car"}).json()["answered_total"] == 0
@@ -325,3 +325,76 @@ def test_prod_mode_hides_the_api_schema(tmp_path):
     finally:
         del os.environ["DL_ENV"]
         importlib.reload(__import__("app.main", fromlist=["main"]))
+
+
+def test_oversized_username_is_refused_before_it_becomes_a_ratelimit_key(anon_client):
+    """限流字典的 key 來自未認證的請求，所以輸入必須先有上限。
+
+    沒有上限時，15 個 5 MB 的 username 就能讓程序 RSS 從 220 MB 漲到 324 MB
+    而且不回收 —— 一台機器每分鐘 100 MB，換幾個 IP 就是分鐘級的 OOM。
+    """
+    r = anon_client.post("/api/auth/login",
+                         json={"username": "x" * 5000, "password": GOOD})
+    assert r.status_code == 422
+    assert ratelimit.LOGIN_USER.check("x" * 5000) == 0  # 從沒進過那個字典
+
+
+def test_ratelimit_buckets_do_not_grow_without_bound():
+    lim = ratelimit.Limiter(capacity=5, per_seconds=60)
+    for i in range(lim.MAX_KEYS + 100):
+        lim.check(f"k{i}")
+    assert len(lim._buckets) <= lim.MAX_KEYS
+
+
+def test_password_hashing_never_holds_the_write_lock(client, monkeypatch):
+    """Argon2 一次 143ms。跑在 BEGIN IMMEDIATE 裡的話，未認證的假登入就能讓
+    同時間的 /api/answer、/api/sync 全部排隊到 busy_timeout 用盡而回 500。
+    """
+    import app.auth
+    import app.db
+
+    depth = {"n": 0, "hashed_inside": False}
+    real_session = app.db.session
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def counting_session(write=False):
+        if write:
+            depth["n"] += 1
+        try:
+            with real_session(write=write) as conn:
+                yield conn
+        finally:
+            if write:
+                depth["n"] -= 1
+
+    real_verify = app.auth.verify_password
+
+    def watched_verify(*a, **k):
+        if depth["n"] > 0:
+            depth["hashed_inside"] = True
+        return real_verify(*a, **k)
+
+    monkeypatch.setattr(app.db, "session", counting_session)
+    monkeypatch.setattr(app.auth, "verify_password", watched_verify)
+
+    client.post("/api/auth/login", json={"username": TEST_USER, "password": TEST_PASSWORD})
+    assert not depth["hashed_inside"], "密碼雜湊跑在寫入交易裡，會獨佔 SQLite 寫鎖"
+
+
+def test_expired_sessions_are_cleaned_up_on_login(client, tmp_path):
+    """過期的 session 列不會自己消失 —— 每次登入一列，90 天內只增不減。"""
+    conn = sqlite3.connect(tmp_path / "app.db")
+    conn.execute(
+        "INSERT INTO session(token_sha256, user_id, created_at, expires_at)"
+        " VALUES('dead', 1, '2020-01-01T00:00:00+00:00', '2020-01-02T00:00:00+00:00')"
+    )
+    conn.commit()
+    assert conn.execute("SELECT COUNT(*) FROM session").fetchone()[0] == 2
+
+    client.post("/api/auth/login", json={"username": TEST_USER, "password": TEST_PASSWORD})
+    left = sqlite3.connect(tmp_path / "app.db").execute(
+        "SELECT token_sha256 FROM session"
+    ).fetchall()
+    assert "dead" not in [r[0] for r in left]

@@ -34,7 +34,7 @@ def _events(client):
 
 
 def _state(client):
-    return next(s for s in client.get("/api/bootstrap").json()["states"] if s["id"] == CARD)
+    return next(s for s in client.get("/api/state").json()["states"] if s["id"] == CARD)
 
 
 def test_in_order_delivery_is_the_reference_result(client):

@@ -652,3 +652,6 @@ main {
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+
+/* 內聯 style 屬性會被 CSP 擋掉（style-src 不含 'unsafe-inline'），改用 class */
+.set-hint { margin-top: var(--space-2); }

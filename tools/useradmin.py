@@ -87,13 +87,16 @@ def cmd_logout_all(args) -> None:
 
 def cmd_delete(args) -> None:
     db.init()
-    with db.session(write=True) as conn:
+    # 確認提示不能在寫入交易裡：那會在等人打字的整段時間握著 SQLite 的寫鎖，
+    # 而服務是 24/7 KeepAlive 的 —— 猶豫幾秒，線上所有寫入就開始回 500。
+    with db.session() as conn:
         user = _user_or_exit(conn, args.username)
         cards = conn.execute(
             "SELECT COUNT(*) n FROM card_state WHERE user_id=?", (user["id"],)
         ).fetchone()["n"]
-        if input(f"要刪除 {user['username']}（{cards} 張卡的進度）嗎？打 yes：") != "yes":
-            sys.exit("取消")
+    if input(f"要刪除 {user['username']}（{cards} 張卡的進度）嗎？打 yes：") != "yes":
+        sys.exit("取消")
+    with db.session(write=True) as conn:
         conn.execute("DELETE FROM user WHERE id=?", (user["id"],))
     print(f"已刪除 {user['username']}。")
 

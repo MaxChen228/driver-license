@@ -12,6 +12,27 @@ const UNLEARNED = "unlearned";
 const DUE = "due";
 const REVIEWED = "reviewed";
 
+// 參數在本地，不從伺服器拿。匿名模式根本沒有伺服器可問，而讓同一組數字有兩個
+// 來源只會製造「兩邊不一致」這種查不出來的 bug。與 app/srs.py 的 PRESETS 逐值
+// 對應，tests/test_srs_parity.py 會比對兩邊完全相等。
+const PRESETS = {
+  relaxed: {
+    initial_hours: 24.0, remembered_mult: 2.5, forgot_mult: 0.5,
+    min_hours: 6.0, max_hours: 24 * 60,
+  },
+  intensive: {
+    initial_hours: 8.0, remembered_mult: 1.4, forgot_mult: 0.35,
+    min_hours: 4.0, max_hours: 24 * 60,
+  },
+};
+const DEFAULT_PRESET = "relaxed";
+
+function params(preset) {
+  const cfg = PRESETS[preset];
+  if (!cfg) throw new Error(`unknown preset: ${preset}`);
+  return cfg;
+}
+
 // 夾擠順序有意義：先 base = max(current, min) 再乘、再夾回 [min, max]。
 // 在下限的卡答錯是 6 × 0.5 = 3 → 夾回 6h，不是 3h。
 function nextIntervalHours(currentHours, remembered, cfg) {
@@ -47,4 +68,8 @@ function applyFeedback(state, remembered, cfg, now) {
   };
 }
 
-export { FORGOT, REMEMBERED, UNLEARNED, DUE, REVIEWED, nextIntervalHours, deriveState, applyFeedback };
+export {
+  FORGOT, REMEMBERED, UNLEARNED, DUE, REVIEWED,
+  PRESETS, DEFAULT_PRESET, params,
+  nextIntervalHours, deriveState, applyFeedback,
+};

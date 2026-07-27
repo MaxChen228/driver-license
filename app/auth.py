@@ -23,6 +23,7 @@ import hashlib
 import re
 import secrets
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -162,6 +163,18 @@ def user_for_token(conn: sqlite3.Connection, token: str) -> sqlite3.Row | None:
     return row
 
 
+def purge_expired_sessions(conn: sqlite3.Connection, user_id: int) -> None:
+    """順手清掉這個帳號已過期的 session 列。
+
+    過期在 user_for_token 是「查到但判定無效」，列不會自己消失 —— 每次登入一列、
+    90 天內只增不減。掛在登入這條路上清是最省事的：反正已經在寫入交易裡了。
+    """
+    conn.execute(
+        "DELETE FROM session WHERE user_id=? AND expires_at<=?",
+        (user_id, db.iso(datetime.now(timezone.utc))),
+    )
+
+
 def drop_session(conn: sqlite3.Connection, token: str) -> None:
     conn.execute("DELETE FROM session WHERE token_sha256=?", (_token_hash(token),))
 
@@ -205,19 +218,36 @@ def find_user(conn: sqlite3.Connection, username: str) -> sqlite3.Row | None:
     ).fetchone()
 
 
-def create_user(conn: sqlite3.Connection, username: str, password: str) -> tuple[int, str]:
-    """回傳 (user_id, 救援碼明文)。救援碼只有這一刻拿得到。"""
+@dataclass(frozen=True)
+class Credentials:
+    """雜湊好的密碼與救援碼。
+
+    刻意做成「先算好再進交易」：Argon2 一次 143ms，跑在 BEGIN IMMEDIATE 裡等於
+    讓一次登入嘗試獨佔整個 app 的 SQLite 寫鎖。分開之後交易裡只剩 INSERT/UPDATE。
+    """
+
+    password_hash: str
+    recovery_hash: str
+    recovery_code: str
+
+
+def new_credentials(password: str) -> Credentials:
     code = new_recovery_code()
+    return Credentials(hash_password(password), hash_recovery_code(code), code)
+
+
+def create_user(conn: sqlite3.Connection, username: str, creds: Credentials) -> tuple[int, str]:
+    """回傳 (user_id, 救援碼明文)。救援碼只有這一刻拿得到。"""
     try:
         cur = conn.execute(
             """INSERT INTO user(username, password_hash, recovery_hash, created_at)
                VALUES(?,?,?,?)""",
-            (username, hash_password(password), hash_recovery_code(code),
+            (username, creds.password_hash, creds.recovery_hash,
              db.iso(datetime.now(timezone.utc))),
         )
     except sqlite3.IntegrityError:
         raise HTTPException(409, "這個帳號已經有人用了") from None
-    return cur.lastrowid, code
+    return cur.lastrowid, creds.recovery_code
 
 
 def require_user(request: Request) -> sqlite3.Row:

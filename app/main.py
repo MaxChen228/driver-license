@@ -12,10 +12,10 @@
 
 from __future__ import annotations
 
-import logging
 import os
 import random
 import sqlite3
+import sys
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -23,6 +23,8 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from typing import Annotated
+
 from pydantic import BaseModel, Field
 
 from . import auth, db, ratelimit, srs
@@ -45,11 +47,15 @@ app = FastAPI(
 DECK_DATA = load_decks()
 db.init()
 
-logging.getLogger("driver-license").info(
-    "env=%s docs=%s turnstile=%s",
-    "prod" if IS_PROD else "dev",
-    "off" if IS_PROD else "/api/docs",
-    "on" if os.environ.get("DL_TURNSTILE_SECRET") else "off",
+# 直接寫 stderr，不走 logging：import 期發出的 INFO 沒有任何 handler 接
+# （root 的 lastResort 門檻是 WARNING，uvicorn 的 LOGGING_CONFIG 也不碰 root），
+# 整行會被安靜丟掉。實測以 DL_ENV=prod 啟動時 log 裡根本沒有這行。
+# 這行的用途正是「secrets 檔漏了或 DL_ENV 打錯時要看得出來」，不能自己先消失。
+print(
+    f"driver-license: env={'prod' if IS_PROD else 'dev'}"
+    f" docs={'off' if IS_PROD else '/api/docs'}"
+    f" turnstile={'on' if os.environ.get('DL_TURNSTILE_SECRET') else 'off'}",
+    file=sys.stderr, flush=True,
 )
 
 # 只有登入的人有伺服器端資料，所以幾乎每個 API 都掛這個相依。
@@ -160,30 +166,37 @@ TURNSTILE_SITEKEY = os.environ.get("DL_TURNSTILE_SITEKEY", "")
 TURNSTILE_SECRET = os.environ.get("DL_TURNSTILE_SECRET", "")
 
 
+# 每個欄位都要有上限。username 特別重要：它會被拿來當限流字典的 key，而那個字典
+# 不淘汰 —— 沒有上限的話，未認證的請求就能用「很長的帳號名」把記憶體撐爆
+# （實測 15 個 5 MB 的 username 讓 RSS 從 220 MB 漲到 324 MB 且不回收）。
+Username = Annotated[str, Field(max_length=64)]
+Password = Annotated[str, Field(max_length=auth.PASSWORD_MAX)]
+
+
 class RegisterIn(BaseModel):
-    username: str
-    password: str
-    turnstile_token: str | None = None
+    username: Username
+    password: Password
+    turnstile_token: str | None = Field(default=None, max_length=4096)
 
 
 class LoginIn(BaseModel):
-    username: str
-    password: str
+    username: Username
+    password: Password
 
 
 class PasswordIn(BaseModel):
-    current_password: str
-    new_password: str
+    current_password: Password
+    new_password: Password
 
 
 class RecoverIn(BaseModel):
-    username: str
-    recovery_code: str
-    new_password: str
+    username: Username
+    recovery_code: Annotated[str, Field(max_length=128)]
+    new_password: Password
 
 
 class DeleteAccountIn(BaseModel):
-    password: str
+    password: Password
 
 
 def _limit(limiter: ratelimit.Limiter, key: str) -> None:
@@ -220,9 +233,11 @@ def register(payload: RegisterIn, request: Request):
     _verify_turnstile(payload.turnstile_token, ip)
     auth.validate_username(payload.username)
     auth.validate_password(payload.password)
+    # 雜湊在交易外算好再進去，理由同 login
+    creds = auth.new_credentials(payload.password)
 
     with db.session(write=True) as conn:
-        user_id, code = auth.create_user(conn, payload.username, payload.password)
+        user_id, code = auth.create_user(conn, payload.username, creds)
         token = auth.create_session(
             conn, user_id, ip, request.headers.get("user-agent", "")
         )
@@ -237,18 +252,21 @@ def login(payload: LoginIn, request: Request):
     _limit(ratelimit.LOGIN_IP, ip)
     _limit(ratelimit.LOGIN_USER, payload.username.lower())
 
-    with db.session(write=True) as conn:
+    # 雜湊驗證在交易「外面」。Argon2 一次 143ms，跑在 BEGIN IMMEDIATE 裡等於讓
+    # 未認證的假登入獨佔整個 app 的 SQLite 寫鎖 —— 實測 40 個併發假登入會讓同時間
+    # 的 /api/answer、/api/sync 全部撞上 busy_timeout 回 500。交易裡只留 INSERT。
+    with db.session() as conn:
         user = auth.find_user(conn, payload.username)
-        # 帳號不存在也要跑滿一次雜湊驗證。少了它，「查無此人」會比「密碼錯誤」
-        # 快一個數量級，光靠計時就能把帳號列舉出來。錯誤訊息也必須完全一樣。
-        if not auth.verify_password(user["password_hash"] if user else None, payload.password):
-            raise HTTPException(401, "帳號或密碼不正確")
+    # 帳號不存在也要跑滿一次雜湊驗證。少了它，「查無此人」會比「密碼錯誤」
+    # 快一個數量級，光靠計時就能把帳號列舉出來。錯誤訊息也必須完全一樣。
+    if not auth.verify_password(user["password_hash"] if user else None, payload.password):
+        raise HTTPException(401, "帳號或密碼不正確")
+    rehashed = auth.hash_password(payload.password) if auth.needs_rehash(user["password_hash"]) else None
 
-        if auth.needs_rehash(user["password_hash"]):
-            conn.execute(
-                "UPDATE user SET password_hash=? WHERE id=?",
-                (auth.hash_password(payload.password), user["id"]),
-            )
+    with db.session(write=True) as conn:
+        if rehashed:
+            conn.execute("UPDATE user SET password_hash=? WHERE id=?", (rehashed, user["id"]))
+        auth.purge_expired_sessions(conn, user["id"])
         token = auth.create_session(
             conn, user["id"], ip, request.headers.get("user-agent", "")
         )
@@ -283,17 +301,19 @@ def change_password(payload: PasswordIn, request: Request,
                     user: sqlite3.Row = CurrentUser):
     auth.validate_password(payload.new_password)
     token = request.cookies.get(auth.COOKIE_NAME)
-    with db.session(write=True) as conn:
+    with db.session() as conn:
         row = conn.execute(
             "SELECT password_hash FROM user WHERE id=?", (user["id"],)
         ).fetchone()
-        if not auth.verify_password(row["password_hash"], payload.current_password):
-            raise HTTPException(401, "目前的密碼不正確")
-        code = auth.new_recovery_code()
+    if not auth.verify_password(row["password_hash"], payload.current_password):
+        raise HTTPException(401, "目前的密碼不正確")
+    creds = auth.new_credentials(payload.new_password)
+    code = creds.recovery_code
+
+    with db.session(write=True) as conn:
         conn.execute(
             "UPDATE user SET password_hash=?, recovery_hash=? WHERE id=?",
-            (auth.hash_password(payload.new_password), auth.hash_recovery_code(code),
-             user["id"]),
+            (creds.password_hash, creds.recovery_hash, user["id"]),
         )
         # 換密碼多半正是因為「可能已經外洩」。只換密碼卻留著舊 session，
         # 等於什麼都沒做 —— 對方手上的 cookie 照樣有效。
@@ -307,17 +327,19 @@ def recover(payload: RecoverIn, request: Request):
     _limit(ratelimit.RECOVER_IP, ip)
     auth.validate_password(payload.new_password)
 
-    with db.session(write=True) as conn:
+    with db.session() as conn:
         user = auth.find_user(conn, payload.username)
-        if not auth.verify_recovery_code(
-            user["recovery_hash"] if user else None, payload.recovery_code
-        ):
-            raise HTTPException(401, "帳號或救援碼不正確")
-        code = auth.new_recovery_code()
+    if not auth.verify_recovery_code(
+        user["recovery_hash"] if user else None, payload.recovery_code
+    ):
+        raise HTTPException(401, "帳號或救援碼不正確")
+    creds = auth.new_credentials(payload.new_password)
+    code = creds.recovery_code
+
+    with db.session(write=True) as conn:
         conn.execute(
             "UPDATE user SET password_hash=?, recovery_hash=? WHERE id=?",
-            (auth.hash_password(payload.new_password), auth.hash_recovery_code(code),
-             user["id"]),
+            (creds.password_hash, creds.recovery_hash, user["id"]),
         )
         auth.drop_all_sessions(conn, user["id"])  # 舊救援碼用掉了，全部重來
         token = auth.create_session(
@@ -330,12 +352,14 @@ def recover(payload: RecoverIn, request: Request):
 
 @app.delete("/api/account")
 def delete_account(payload: DeleteAccountIn, user: sqlite3.Row = CurrentUser):
-    with db.session(write=True) as conn:
+    with db.session() as conn:
         row = conn.execute(
             "SELECT password_hash FROM user WHERE id=?", (user["id"],)
         ).fetchone()
-        if not auth.verify_password(row["password_hash"], payload.password):
-            raise HTTPException(401, "密碼不正確")
+    if not auth.verify_password(row["password_hash"], payload.password):
+        raise HTTPException(401, "密碼不正確")
+
+    with db.session(write=True) as conn:
         # 一行 DELETE，其餘靠 ON DELETE CASCADE。手動一張表一張表清，
         # 總有一天會漏掉新加的那張。
         conn.execute("DELETE FROM user WHERE id=?", (user["id"],))
@@ -477,7 +501,9 @@ class SyncIn(BaseModel):
     # 上限不是效能考量，是「一個請求能讓伺服器做多少事」的閘門。
     # 前端補送本來就分批（每批 500 筆），正常使用永遠碰不到。
     answers: list[AnswerIn] = Field(default_factory=list, max_length=5000)
-    notes: dict[str, str] = Field(default_factory=dict, max_length=5000)
+    notes: dict[str, Annotated[str, Field(max_length=4000)]] = Field(
+        default_factory=dict, max_length=5000
+    )
 
 
 def _question(card_id: str) -> dict:
@@ -610,27 +636,20 @@ def regrade(payload: RegradeIn, user: sqlite3.Row = CurrentUser):
 # ---------------------------------------------------------------- offline sync
 
 
-def _bootstrap_payload(conn, user_id: int) -> dict:
-    """前端離線運作所需的一切（題目本身除外，那是 /data/*.json 由 SW 預先快取）。
+def _config_payload() -> dict:
+    """對所有人都一樣、而且不會變的東西。公開，可長期快取，service worker 預先抓。
 
-    有了它，前端就能在完全沒有網路時自己算出 unlearned/due/reviewed、建佇列、
-    跑排程 —— 伺服器只是同步的目的地，不是每翻一張卡的必要條件。
+    刻意不含 SRS 參數：那些由 static/srs.js 自帶（PRESETS 與 app/srs.py 逐值對應，
+    tests/test_srs_parity.py 兩邊比對）。匿名模式下沒有伺服器可問，參數只能在本地；
+    與其讓同一組數字有兩個來源，不如讓本地那份成為唯一來源、用測試釘住它一致。
     """
-    cfg = _cfg(conn, user_id)
     return {
         "server_time": db.iso(srs.utcnow()),
-        "reference_time": db.iso(_now(conn, user_id)),  # 凍結時鐘生效時會與 server_time 不同
-        "preset": db.preset_name(conn, user_id),
         "presets": list(srs.PRESETS),
-        "paused": db.get_setting(conn, user_id, "paused", "0") == "1",
-        "paused_at": db.get_setting(conn, user_id, "paused_at", "") or None,
-        "params": {
-            "initial_hours": cfg.initial_hours,
-            "remembered_mult": cfg.remembered_mult,
-            "forgot_mult": cfg.forgot_mult,
-            "min_hours": cfg.min_hours,
-            "max_hours": cfg.max_hours,
-        },
+        "default_preset": srs.DEFAULT_PRESET,
+        # 有設 sitekey 前端才渲染 widget。兩者必須一起開：只設 secret 而前端沒有
+        # widget 的話，每一次註冊都會拿到「人機驗證未通過」，而且看不出為什麼。
+        "turnstile_sitekey": TURNSTILE_SITEKEY or None,
         "decks": [
             {
                 "deck": k,
@@ -639,19 +658,41 @@ def _bootstrap_payload(conn, user_id: int) -> dict:
                 "version": DECK_DATA[k].version,
                 "total": len(DECK_DATA[k].questions),
                 "categories": DECK_DATA[k].categories,
-                "url": f"/data/{k}.json",
+                # 版號進 URL：題庫換版才換網址，於是 CF 邊緣與瀏覽器都能長期快取，
+                # 又不會在改版後拿到舊的（見 deck_json 的 cache-control）。
+                "url": f"/data/{k}.json?v={DECK_DATA[k].version}",
             }
             for k in DECKS
         ],
+    }
+
+
+def _state_payload(conn, user_id: int) -> dict:
+    """這個帳號的東西。需要身分，不可快取。
+
+    有了它，前端就能在完全沒有網路時自己算出 unlearned/due/reviewed、建佇列、
+    跑排程 —— 伺服器只是同步的目的地，不是每翻一張卡的必要條件。
+    """
+    return {
+        "server_time": db.iso(srs.utcnow()),
+        "reference_time": db.iso(_now(conn, user_id)),  # 凍結時鐘生效時會與 server_time 不同
+        "preset": db.preset_name(conn, user_id),
+        "paused": db.get_setting(conn, user_id, "paused", "0") == "1",
+        "paused_at": db.get_setting(conn, user_id, "paused_at", "") or None,
         "states": db.all_states(conn, user_id),
         "notes": db.all_notes(conn, user_id),
     }
 
 
-@app.get("/api/bootstrap")
-def bootstrap(user: sqlite3.Row = CurrentUser):
+@app.get("/api/config")
+def config():
+    return _config_payload()
+
+
+@app.get("/api/state")
+def state(user: sqlite3.Row = CurrentUser):
     with db.session() as conn:
-        return _bootstrap_payload(conn, user["id"])
+        return _state_payload(conn, user["id"])
 
 
 @app.post("/api/sync")
@@ -708,7 +749,7 @@ def sync(payload: SyncIn, user: sqlite3.Row = CurrentUser):
 
         # 刻意在寫入交易內取快照：回傳的狀態必須剛好等於這批補送的結果，
         # 出了交易再讀就可能夾雜別台裝置插進來的寫入。代價是寫鎖多握一小段。
-        out = _bootstrap_payload(conn, uid)
+        out = _state_payload(conn, uid)
 
     out["sync"] = {"applied": applied, "skipped": skipped, "failed": failed}
     return out
@@ -718,7 +759,8 @@ def sync(payload: SyncIn, user: sqlite3.Row = CurrentUser):
 
 
 class NoteIn(BaseModel):
-    body: str
+    # 沒有上限的話，登入使用者可以無上限地把磁碟寫滿
+    body: Annotated[str, Field(max_length=4000)]
 
 
 @app.get("/api/note/{card_id}")
