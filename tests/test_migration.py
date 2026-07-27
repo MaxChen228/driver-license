@@ -13,6 +13,12 @@ from fastapi.testclient import TestClient
 
 from tests.conftest import data_dir_env
 
+
+def app_db_version():
+    import app.db
+
+    return app.db.SCHEMA_VERSION
+
 # v1 的 schema 原文（commit 493ba62 之前的 app/db.py SCHEMA，加上當時的 ALTER）。
 # 刻意抄一份而不是 import 舊程式：遷移要能對付「真實存在過的檔案」，
 # 而那份 schema 已經不在程式碼裡了。
@@ -167,7 +173,7 @@ def test_v1_tables_are_gone_and_version_is_stamped(migrated):
     conn = connect()
     names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert not (names & {"card", "card_v1", "review_event_v1", "note_v1", "setting_v1"})
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == app_db_version()
 
 
 def test_migration_is_idempotent(migrated):
@@ -177,17 +183,17 @@ def test_migration_is_idempotent(migrated):
     _, connect = migrated
     before = connect().execute("SELECT COUNT(*) FROM review_event").fetchone()[0]
 
-    # 直接釘住守衛本身：v2 的 DB 再開，_upgrade_v1_to_v2 一次都不能被呼叫。
+    # 直接釘住守衛本身：已是最新版的 DB 再開，_rebuild_from_v1 一次都不能被呼叫。
     # 只比對事件數是釘不住的 —— 守衛拿掉後 _is_v1 找不到 card 表也會回 False，
     # 走 _apply_schema 全 no-op，數字照樣不變，測試照樣綠。
     called = []
-    original = app.db._upgrade_v1_to_v2
-    app.db._upgrade_v1_to_v2 = lambda conn: called.append(1)
+    original = app.db._rebuild_from_v1
+    app.db._rebuild_from_v1 = lambda conn: called.append(1)
     try:
         app.db.init()
         app.db.init()
     finally:
-        app.db._upgrade_v1_to_v2 = original
+        app.db._rebuild_from_v1 = original
 
     assert called == []
     conn = connect()

@@ -8,7 +8,7 @@
 
 import itertools
 
-from fastapi.testclient import TestClient
+import pytest
 
 from tests.conftest import _fresh_client
 
@@ -114,13 +114,117 @@ def test_repeated_delivery_of_the_same_batch_changes_nothing(client):
     assert _state(client) == once
 
 
-def test_batch_touching_one_card_many_times_rebuilds_once(client):
-    """整批送達時亂序重算要延到迴圈外做，不能每碰一次算一次。
+def test_batch_touching_one_card_many_times_rebuilds_once(client, monkeypatch):
+    """整批送達時亂序重算要延到迴圈外做，不能每碰一次算一次。"""
+    import app.db
 
-    這裡驗的是結果正確；效能面的保證由 rebuild 只在迴圈後跑一次來提供。
-    """
+    calls = []
+    original = app.db.rebuild_card
+    monkeypatch.setattr(
+        app.db, "rebuild_card",
+        lambda *a, **k: (calls.append(a[2]), original(*a, **k))[1],
+    )
+
     evs = _events(client)
     client.post("/api/sync", json={"answers": [evs[2]]})
     r = client.post("/api/sync", json={"answers": [evs[1], evs[0]]}).json()
     assert r["sync"]["applied"] == ["e1", "e2"]  # 批內仍照 reviewed_at 排序
     assert _state(client)["interval_hours"] == 75.0
+    # 兩筆都亂序、都碰同一張卡，但整批只該重算一次
+    assert calls == [CARD]
+
+
+def test_in_order_answers_never_rebuild(client, monkeypatch):
+    """快路徑要保住：照時間抵達就不該回頭重算整段歷史。
+
+    全面重算會讓「換一次 preset」把過去追溯改寫，那是使用者沒要求的事。
+    """
+    import app.db
+
+    calls = []
+    monkeypatch.setattr(
+        app.db, "rebuild_card", lambda *a, **k: calls.append(a[2]),
+    )
+    for e in _events(client):
+        client.post("/api/sync", json={"answers": [e]})
+    assert calls == []
+
+
+def test_pause_does_not_collapse_the_history_of_backfilled_answers(client):
+    """暫停期間補送舊作答，仍必須收斂。
+
+    凍結時鐘原本會把每一筆補送的 reviewed_at 都改寫成 paused_at，於是整批事件
+    共用同一個時刻：亂序偵測的 `>` 永遠不成立，重算的順序退化成插入順序，
+    收斂保證在暫停期間整個失效。凍結時鐘要凍的是「現在幾點」，
+    不是「那件事什麼時候發生的」。
+    """
+    evs = _events(client)
+    client.put("/api/settings", json={"paused": True})
+
+    for i in (2, 0, 1):  # 亂序補送
+        client.post("/api/sync", json={"answers": [evs[i]]})
+
+    st = _state(client)
+    assert st["interval_hours"] == 75.0
+    assert st["review_count"] == 3 and st["lapse_count"] == 1 and st["streak"] == 1
+    # 每一天各自記帳，不能全部塌成暫停那一天
+    activity = client.get("/api/stats", params={"deck": "car"}).json()["activity"]
+    assert [a["day"] for a in activity] == ["2026-07-18", "2026-07-19", "2026-07-20"]
+
+
+def test_changing_preset_does_not_rewrite_older_history(client):
+    """換 preset 之後，任何一筆遲到的舊事件都不該把整張卡改寫。
+
+    重算若一律用「現在的」參數：relaxed 下答對三次是 375h，切到 intensive 後
+    來一筆亂序的舊事件會整段重算成 30.7h —— 使用者只是換過設定，卡片卻悄悄
+    搬家，而且最終狀態重新取決於抵達順序。每筆事件用它自己的 preset 才對。
+    """
+    answer = client.get(f"/api/card/{CARD}").json()["question"]["answer"]
+    for i, t in enumerate(TIMES):
+        client.post("/api/sync", json={"answers": [
+            {"card_id": CARD, "chosen": answer, "client_event_id": f"r{i}",
+             "reviewed_at": t},
+        ]})
+    assert _state(client)["interval_hours"] == 375.0  # 24 × 2.5³
+
+    client.put("/api/settings", json={"preset": "intensive"})
+
+    # 一筆遲到的舊事件（時間落在最前面），觸發整段重算
+    client.post("/api/sync", json={"answers": [
+        {"card_id": CARD, "chosen": answer, "client_event_id": "late",
+         "reviewed_at": "2026-07-17T02:00:00+00:00"},
+    ]})
+    # 重算後的鏈：late 用 intensive（它作答時的設定），另外三筆維持 relaxed
+    #   fresh(intensive 8h) →×1.4→ 11.2 →×2.5→ 28 →×2.5→ 70 →×2.5→ 175
+    # 插進一筆更早的事件本來就會讓整條鏈重算，175 ≠ 375 是正常的。
+    st = _state(client)
+    assert st["review_count"] == 4
+    assert st["interval_hours"] == 175.0
+    # 關鍵：不能是 30.73 —— 那是「整段歷史都用現在的 intensive 重算」的結果
+    #   fresh(8) →×1.4→ 11.2 →×1.4→ 15.68 →×1.4→ 21.95 →×1.4→ 30.73
+    assert st["interval_hours"] != pytest.approx(30.73, abs=0.01)
+
+
+def test_events_sort_by_instant_not_by_text(client):
+    """reviewed_at 是前端給的，時區偏移原樣存進 DB —— 文字序不等於時間序。
+
+    '2026-07-20T10:00:00+08:00'（＝02:00 UTC）在文字上排在
+    '2026-07-20T03:00:00+00:00' 之後，實際上卻早一小時。SQL 裡 ORDER BY
+    reviewed_at 就會把兩筆的先後對調，重算出來的 streak / last_feedback 全反。
+    """
+    answer = client.get(f"/api/card/{CARD}").json()["question"]["answer"]
+    wrong = next(x for x in (1, 2, 3) if x != answer)
+    # 真實順序：先答對（02:00 UTC），再答錯（03:00 UTC）
+    early_correct = {"card_id": CARD, "chosen": answer, "client_event_id": "tz1",
+                     "reviewed_at": "2026-07-20T10:00:00+08:00"}
+    later_wrong = {"card_id": CARD, "chosen": wrong, "client_event_id": "tz2",
+                   "reviewed_at": "2026-07-20T03:00:00+00:00"}
+
+    client.post("/api/sync", json={"answers": [later_wrong]})   # 晚的先到
+    client.post("/api/sync", json={"answers": [early_correct]})  # 早的後到，觸發重算
+
+    st = _state(client)
+    # 正確順序（對→錯）：streak 歸零、最後一次是 forgot
+    assert st["streak"] == 0
+    assert st["last_feedback"] == 0
+    assert st["lapse_count"] == 1

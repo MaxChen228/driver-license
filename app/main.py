@@ -44,10 +44,20 @@ def _cfg(conn, user_id: int) -> srs.ReviewSettings:
 def _now(conn, user_id: int, at: datetime | None = None):
     """作答時刻。
 
-    離線補送會帶著「當初真正作答的時間」回來，否則整批會被記成同一刻，
-    間隔與熱力圖都會失真。凍結時鐘仍然優先（暫停期間一律用 paused_at）。
+    帶了 at（離線補送附上的真實作答時刻）就用它，凍結時鐘不得覆蓋。
+    原本是反過來的：暫停期間一律改用 paused_at，連補送的歷史事件也一起塌成那一刻。
+    後果有三個，而且都不會有跡象：
+      1. 整批事件拿到同一個 reviewed_at，亂序偵測的 `>` 永遠不成立，
+         重算的順序退化成插入順序 —— 收斂保證在暫停期間整個失效。
+         實測 4 個事件的兩種抵達順序會得到 7.5h 與 15h，差兩倍。
+      2. day_key 全部記成暫停當天，熱力圖與連續天數失真。
+      3. 「上週二答的那題」被記成「按下暫停的那一刻」，事實被改寫。
+    凍結時鐘要凍的是「現在幾點」，不是「那件事什麼時候發生的」——
+    所以只在沒有 at（真的在當下作答）時才問 reference_now。
     """
-    return db.reference_now(conn, user_id, at or srs.utcnow())
+    if at is not None:
+        return at
+    return db.reference_now(conn, user_id, srs.utcnow())
 
 
 def _deck_or_404(deck: str):
@@ -226,10 +236,12 @@ def _record(conn, user_id: int, q: dict, chosen: int | None, correct: bool, reme
             elapsed_ms: int | None, before: srs.CardState,
             reviewed_at: datetime | None = None,
             client_event_id: str | None = None,
-            dirty: set[str] | None = None) -> dict:
+            dirty: set[tuple[str, str]] | None = None) -> dict:
     """呼叫端必須在 db.session(write=True) 之內（regrade 的 DELETE + 重打要同一交易）。"""
     now = _now(conn, user_id, reviewed_at)
-    after = srs.apply_feedback(before, remembered, _cfg(conn, user_id), now)
+    preset = db.preset_name(conn, user_id)
+    cfg = srs.ReviewSettings.preset(preset)
+    after = srs.apply_feedback(before, remembered, cfg, now)
     db.put_state(conn, user_id, q["id"], q["deck"], after)
     db.log_event(
         conn,
@@ -255,6 +267,7 @@ def _record(conn, user_id: int, q: dict, chosen: int | None, correct: bool, reme
         streak_after=after.review_streak,
         lapse_after=after.lapse_count,
         client_event_id=client_event_id,
+        preset=preset,  # 重算時要用「當時」的參數，不是現在的
     )
 
     # 亂序偵測：這張卡若已經有比 now 更晚的事件，剛剛那筆增量套用就是把舊事件
@@ -263,9 +276,9 @@ def _record(conn, user_id: int, q: dict, chosen: int | None, correct: bool, reme
     # 每次都重算是白工），此時先記下來就好。
     if db.has_later_event(conn, user_id, q["id"], now):
         if dirty is None:
-            after = db.rebuild_card(conn, user_id, q["id"], q["deck"], _cfg(conn, user_id))
+            after = db.rebuild_card(conn, user_id, q["id"], q["deck"], cfg)
         else:
-            dirty.add(q["id"])
+            dirty.add((q["id"], q["deck"]))
 
     return {
         "card_id": q["id"],
@@ -281,7 +294,7 @@ def _record(conn, user_id: int, q: dict, chosen: int | None, correct: bool, reme
 
 
 def _apply_answer(conn, user_id: int, payload: AnswerIn,
-                  dirty: set[str] | None = None) -> dict:
+                  dirty: set[tuple[str, str]] | None = None) -> dict:
     """呼叫端必須在 db.session(write=True) 之內。"""
     q = _question(payload.card_id)  # 題號不存在於題庫就 404
     before = db.get_state(conn, user_id, payload.card_id, _cfg(conn, user_id))
@@ -401,7 +414,7 @@ def sync(payload: SyncIn):
         payload.answers,
         key=lambda a: (a.reviewed_at or srs.utcnow(), a.client_event_id or ""),
     )
-    dirty: set[str] = set()
+    dirty: set[tuple[str, str]] = set()
     with db.session(write=True) as conn:
         uid = _current_user(conn)
         for a in ordered:
@@ -430,9 +443,11 @@ def sync(payload: SyncIn):
 
         # 亂序抵達的卡整段重算。放在迴圈外：同一張卡在一批裡被碰好幾次時，
         # 每碰一次重算一次是白工，而且中間那些結果反正都會被最後一次覆蓋。
+        # dirty 帶著 deck 一起收：迴圈外再呼叫 _question 的話，孤兒題號的 404
+        # 會炸掉整個請求並回捲所有已寫入的事件（迴圈內的 404 是被 except 接走的）。
         cfg = _cfg(conn, uid)
-        for card_id in sorted(dirty):
-            db.rebuild_card(conn, uid, card_id, _question(card_id)["deck"], cfg)
+        for card_id, deck in sorted(dirty):
+            db.rebuild_card(conn, uid, card_id, deck, cfg)
 
         # 刻意在寫入交易內取快照：回傳的狀態必須剛好等於這批補送的結果，
         # 出了交易再讀就可能夾雜別台裝置插進來的寫入。代價是寫鎖多握一小段。

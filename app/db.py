@@ -18,7 +18,7 @@ from .srs import DEFAULT_PRESET, REMEMBERED, CardState, ReviewSettings, apply_fe
 
 DATA_DIR = Path(os.environ.get("DL_DATA_DIR", Path.home() / "driver-license-data"))
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS user (
@@ -78,7 +78,11 @@ CREATE TABLE IF NOT EXISTS review_event (
   review_count_after INTEGER, streak_after INTEGER, lapse_after INTEGER,
   -- 離線補送用：前端產生的冪等鍵。SQLite 的 UNIQUE 索引允許多個 NULL，
   -- 所以線上作答留白不會互撞，補送重覆送則會被索引擋下（見 event_exists）。
-  client_event_id TEXT
+  client_event_id TEXT,
+  -- 作答當下生效的 preset 名稱。rebuild_card 要能重現「當時」算出來的結果，
+  -- 拿現在的參數去重算整段歷史，等於換一次 preset 就把過去全部改寫。
+  -- NULL 只會出現在 v3 之前寫下的事件（那時沒有記錄，資訊已經不在了）。
+  preset TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_event_day ON review_event(user_id, deck, day_key);
 CREATE INDEX IF NOT EXISTS idx_event_card ON review_event(user_id, card_id, reviewed_at);
@@ -163,7 +167,14 @@ def _is_v1(conn: sqlite3.Connection) -> bool:
     return "user_id" not in cols
 
 
-def _upgrade_v1_to_v2(conn: sqlite3.Connection) -> None:
+def _upgrade_v2_to_v3(conn: sqlite3.Connection) -> None:
+    """review_event 加 preset 欄。加欄位是 ALTER TABLE 表達得了的，不必重建。"""
+    have = {r["name"] for r in conn.execute("PRAGMA table_info(review_event)")}
+    if "preset" not in have:
+        conn.execute("ALTER TABLE review_event ADD COLUMN preset TEXT")
+
+
+def _rebuild_from_v1(conn: sqlite3.Connection) -> None:
     """把單租戶的 v1 資料整批搬給 user 1。
 
     ALTER TABLE ADD COLUMN 表達不了「把 PK 從 card_id 改成 (user_id, card_id)」，
@@ -230,24 +241,31 @@ def _upgrade_v1_to_v2(conn: sqlite3.Connection) -> None:
 def _migrate(conn: sqlite3.Connection) -> None:
     """版本不認得就拒絕開，不要靜默蓋章。
 
-    最危險的形狀是「未來把 SCHEMA_VERSION 加到 3、在既有表加了欄位」：
-    CREATE TABLE IF NOT EXISTS 對既有表完全無作用，於是欄位沒加、版本卻被蓋成 3，
-    之後每次啟動都認為自己是最新的。寧可開不起來，也不要帶著缺欄位的 DB 跑。
+    CREATE TABLE IF NOT EXISTS 對既有表完全無作用，所以「加了版本號卻只改 SCHEMA」
+    會變成欄位沒加、版本卻被蓋成新的，之後每次啟動都自認最新。每一段升級都要
+    明確寫出來，走不到的版本一律 raise。
     """
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if version == SCHEMA_VERSION:
-        _apply_schema(conn)  # 新增表／索引時補齊，已存在的不動
-        return
     if version > SCHEMA_VERSION:
         raise RuntimeError(
             f"DB schema v{version} 比這份程式支援的 v{SCHEMA_VERSION} 新，拒絕開啟"
         )
-    if version != 0:
+    if version == SCHEMA_VERSION:
+        _apply_schema(conn)  # 新增表／索引時補齊，已存在的不動
+        return
+
+    if version == 0:
+        # _rebuild_from_v1 走的是 _apply_schema，建出來就是最新形狀，不必再逐級升
+        if _is_v1(conn):
+            _rebuild_from_v1(conn)
+        version = SCHEMA_VERSION
+    elif version == 2:
+        _upgrade_v2_to_v3(conn)
+        version = 3
+
+    if version != SCHEMA_VERSION:
         raise RuntimeError(f"沒有 v{version} → v{SCHEMA_VERSION} 的遷移路徑")
-    if _is_v1(conn):
-        _upgrade_v1_to_v2(conn)
-    else:
-        _apply_schema(conn)
+    _apply_schema(conn)
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 
@@ -472,10 +490,13 @@ def event_exists(conn: sqlite3.Connection, user_id: int, client_event_id: str) -
 def _events_for_card(conn: sqlite3.Connection, user_id: int, card_id: str) -> list:
     """該卡的全部事件，依作答時刻排序。
 
-    刻意不在 SQL 裡 ORDER BY reviewed_at：那是 ISO 字串，有沒有小數秒會排錯。
-    '2026-07-20T02:00:01+00:00' 與 '2026-07-20T02:00:00.5+00:00' 逐字元比到第 19 位
-    是 '+'(0x2B) 對 '.'(0x2E)，於是「晚一秒」排到「早半秒」前面。同刻則以 id 決勝，
-    等同插入順序。
+    刻意不在 SQL 裡 ORDER BY reviewed_at。那是 ISO 字串，只有在「時區偏移全部相同」
+    時文字序才等於時間序 —— 而 reviewed_at 是前端給的，pydantic 會保留它原本的偏移，
+    db.iso() 原樣寫進去。實測送 '2026-07-20T10:00:00+08:00' 就以 '+08:00' 存下，
+    文字序把它排在 '...T03:00:00+00:00' 之後，但它其實早一小時。
+
+    同刻的兩筆以 id 決勝（等同插入順序）。這種情況不保證跨裝置收斂，但兩台裝置
+    在同一毫秒答同一張卡才會發生，代價與複雜度不成比例。
     """
     rows = conn.execute(
         "SELECT * FROM review_event WHERE user_id=? AND card_id=?", (user_id, card_id)
@@ -519,13 +540,18 @@ def rebuild_card(
     快照欄位一起改寫是必要的，不是順手：regrade 靠 before 精確回捲上一次作答，
     重算後不同步的話，那些數字會指向一個從來不存在的狀態。
 
-    取捨：重算一律用「當前的」preset 參數，所以中途換過 preset 的歷史會被重寫。
-    可接受 —— 增量路徑本來也是拿當前參數算，只是沒有回頭改舊事件而已。
+    每筆事件用「它當時生效的 preset」重算，不是用現在的。拿現在的參數重算整段歷史
+    的話，換一次 preset 就會讓之後任何一筆遲到的舊事件把整張卡改寫 —— 實測
+    relaxed 下答對三次是 375h，切到 intensive 後來一筆亂序事件會變成 30.7h，
+    而且最終狀態重新取決於抵達順序，正好是這個函式要消滅的東西。
+    v3 之前的事件沒有記錄 preset，只能用呼叫端給的 cfg（那個資訊已經不在了）。
     """
-    state = CardState.fresh(cfg)
+    state = None
     for r in _events_for_card(conn, user_id, card_id):
-        before, at = state, parse(r["reviewed_at"])
-        state = apply_feedback(before, r["feedback"] == REMEMBERED, cfg, at)
+        ev_cfg = ReviewSettings.preset(r["preset"]) if r["preset"] else cfg
+        # 首答用「該筆事件」的 initial_hours 當 base，所以 fresh() 也要跟著它
+        before, at = state or CardState.fresh(ev_cfg), parse(r["reviewed_at"])
+        state = apply_feedback(before, r["feedback"] == REMEMBERED, ev_cfg, at)
         conn.execute(
             """UPDATE review_event SET
                  interval_before=?, interval_after=?,
@@ -533,7 +559,7 @@ def rebuild_card(
                  last_reviewed_before=?,
                  review_count_before=?, streak_before=?, lapse_before=?, feedback_before=?,
                  review_count_after=?, streak_after=?, lapse_after=?
-               WHERE id=?""",
+               WHERE user_id=? AND id=?""",
             (
                 before.review_interval_hours, state.review_interval_hours,
                 iso(before.next_review_at), iso(state.next_review_at),
@@ -541,9 +567,11 @@ def rebuild_card(
                 before.review_count, before.review_streak, before.lapse_count,
                 before.last_review_feedback,
                 state.review_count, state.review_streak, state.lapse_count,
-                r["id"],
+                user_id, r["id"],
             ),
         )
+    if state is None:  # 事件全被刪光（regrade 刪掉最後一筆的極端情況）
+        state = CardState.fresh(cfg)
     put_state(conn, user_id, card_id, deck, state)
     return state
 
