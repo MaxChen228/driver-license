@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .srs import DEFAULT_PRESET, CardState, ReviewSettings
+from .srs import DEFAULT_PRESET, REMEMBERED, CardState, ReviewSettings, apply_feedback
 
 DATA_DIR = Path(os.environ.get("DL_DATA_DIR", Path.home() / "driver-license-data"))
 
@@ -438,6 +438,85 @@ def event_exists(conn: sqlite3.Connection, user_id: int, client_event_id: str) -
         "SELECT 1 FROM review_event WHERE user_id=? AND client_event_id=?",
         (user_id, client_event_id),
     ).fetchone() is not None
+
+
+def _events_for_card(conn: sqlite3.Connection, user_id: int, card_id: str) -> list:
+    """該卡的全部事件，依作答時刻排序。
+
+    刻意不在 SQL 裡 ORDER BY reviewed_at：那是 ISO 字串，有沒有小數秒會排錯。
+    '2026-07-20T02:00:01+00:00' 與 '2026-07-20T02:00:00.5+00:00' 逐字元比到第 19 位
+    是 '+'(0x2B) 對 '.'(0x2E)，於是「晚一秒」排到「早半秒」前面。同刻則以 id 決勝，
+    等同插入順序。
+    """
+    rows = conn.execute(
+        "SELECT * FROM review_event WHERE user_id=? AND card_id=?", (user_id, card_id)
+    ).fetchall()
+    return sorted(rows, key=lambda r: (parse(r["reviewed_at"]), r["id"]))
+
+
+def latest_event(conn: sqlite3.Connection, user_id: int, card_id: str):
+    """這張卡「時間序上」最後一次作答。
+
+    不是 ORDER BY id DESC ——「最後寫進 DB 的」與「最後作答的」在亂序補送之後
+    不是同一筆。regrade 的語義是使用者的「我剛剛那次是猜的」，那指的是時間。
+    """
+    rows = _events_for_card(conn, user_id, card_id)
+    return rows[-1] if rows else None
+
+
+def has_later_event(
+    conn: sqlite3.Connection, user_id: int, card_id: str, at: datetime
+) -> bool:
+    """這張卡還有比 at 更晚的事件嗎？有的話剛寫進去的那筆就是亂序的。"""
+    return any(
+        parse(r["reviewed_at"]) > at
+        for r in conn.execute(
+            "SELECT reviewed_at FROM review_event WHERE user_id=? AND card_id=?",
+            (user_id, card_id),
+        )
+    )
+
+
+def rebuild_card(
+    conn: sqlite3.Connection, user_id: int, card_id: str, deck: str, cfg: ReviewSettings
+) -> CardState:
+    """把這張卡從事件日誌整段重算，並改寫每筆事件的 before/after 快照。
+
+    為什麼需要：間隔是乘法式的，套用順序不可交換。兩台裝置各自離線刷題再補送時，
+    較舊的事件會在較新的狀態之後才抵達，增量套用就是把舊事件疊在新狀態上 ——
+    算出來的間隔是錯的，而且沒有任何跡象，只會安靜地把排程歪掉。
+    唯一能讓「任何到達順序都收斂到同一個結果」的做法，是回到事件日誌重算。
+
+    快照欄位一起改寫是必要的，不是順手：regrade 靠 before 精確回捲上一次作答，
+    重算後不同步的話，那些數字會指向一個從來不存在的狀態。
+
+    取捨：重算一律用「當前的」preset 參數，所以中途換過 preset 的歷史會被重寫。
+    可接受 —— 增量路徑本來也是拿當前參數算，只是沒有回頭改舊事件而已。
+    """
+    state = CardState.fresh(cfg)
+    for r in _events_for_card(conn, user_id, card_id):
+        before, at = state, parse(r["reviewed_at"])
+        state = apply_feedback(before, r["feedback"] == REMEMBERED, cfg, at)
+        conn.execute(
+            """UPDATE review_event SET
+                 interval_before=?, interval_after=?,
+                 next_review_before=?, next_review_after=?,
+                 last_reviewed_before=?,
+                 review_count_before=?, streak_before=?, lapse_before=?, feedback_before=?,
+                 review_count_after=?, streak_after=?, lapse_after=?
+               WHERE id=?""",
+            (
+                before.review_interval_hours, state.review_interval_hours,
+                iso(before.next_review_at), iso(state.next_review_at),
+                iso(before.last_reviewed_at),
+                before.review_count, before.review_streak, before.lapse_count,
+                before.last_review_feedback,
+                state.review_count, state.review_streak, state.lapse_count,
+                r["id"],
+            ),
+        )
+    put_state(conn, user_id, card_id, deck, state)
+    return state
 
 
 # ---------------------------------------------------------------- notes

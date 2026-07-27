@@ -225,7 +225,8 @@ def _question(card_id: str) -> dict:
 def _record(conn, user_id: int, q: dict, chosen: int | None, correct: bool, remembered: bool,
             elapsed_ms: int | None, before: srs.CardState,
             reviewed_at: datetime | None = None,
-            client_event_id: str | None = None) -> dict:
+            client_event_id: str | None = None,
+            dirty: set[str] | None = None) -> dict:
     """呼叫端必須在 db.session(write=True) 之內（regrade 的 DELETE + 重打要同一交易）。"""
     now = _now(conn, user_id, reviewed_at)
     after = srs.apply_feedback(before, remembered, _cfg(conn, user_id), now)
@@ -255,6 +256,17 @@ def _record(conn, user_id: int, q: dict, chosen: int | None, correct: bool, reme
         lapse_after=after.lapse_count,
         client_event_id=client_event_id,
     )
+
+    # 亂序偵測：這張卡若已經有比 now 更晚的事件，剛剛那筆增量套用就是把舊事件
+    # 疊在新狀態上，結果是錯的。回到事件日誌整段重算才會收斂。
+    # dirty 不是 None 表示呼叫端要整批做完再重算（/api/sync 一批可能碰同一張卡好幾次，
+    # 每次都重算是白工），此時先記下來就好。
+    if db.has_later_event(conn, user_id, q["id"], now):
+        if dirty is None:
+            after = db.rebuild_card(conn, user_id, q["id"], q["deck"], _cfg(conn, user_id))
+        else:
+            dirty.add(q["id"])
+
     return {
         "card_id": q["id"],
         "correct": correct,
@@ -268,14 +280,15 @@ def _record(conn, user_id: int, q: dict, chosen: int | None, correct: bool, reme
     }
 
 
-def _apply_answer(conn, user_id: int, payload: AnswerIn) -> dict:
+def _apply_answer(conn, user_id: int, payload: AnswerIn,
+                  dirty: set[str] | None = None) -> dict:
     """呼叫端必須在 db.session(write=True) 之內。"""
     q = _question(payload.card_id)  # 題號不存在於題庫就 404
     before = db.get_state(conn, user_id, payload.card_id, _cfg(conn, user_id))
     correct = payload.chosen == q["answer"]
     return _record(
         conn, user_id, q, payload.chosen, correct, correct and not payload.guessed,
-        payload.elapsed_ms, before, payload.reviewed_at, payload.client_event_id,
+        payload.elapsed_ms, before, payload.reviewed_at, payload.client_event_id, dirty,
     )
 
 
@@ -299,10 +312,7 @@ def regrade(payload: RegradeIn):
     q = _question(payload.card_id)
     with db.session(write=True) as conn:
         uid = _current_user(conn)
-        ev = conn.execute(
-            "SELECT * FROM review_event WHERE user_id=? AND card_id=? ORDER BY id DESC LIMIT 1",
-            (uid, payload.card_id),
-        ).fetchone()
+        ev = db.latest_event(conn, uid, payload.card_id)
         if ev is None:
             raise HTTPException(409, "no answer to regrade")
         if ev["feedback"] == srs.FORGOT:
@@ -389,6 +399,7 @@ def sync(payload: SyncIn):
         payload.answers,
         key=lambda a: (a.reviewed_at or srs.utcnow(), a.client_event_id or ""),
     )
+    dirty: set[str] = set()
     with db.session(write=True) as conn:
         uid = _current_user(conn)
         for a in ordered:
@@ -396,7 +407,7 @@ def sync(payload: SyncIn):
                 skipped.append(a.client_event_id)
                 continue
             try:
-                _apply_answer(conn, uid, a)
+                _apply_answer(conn, uid, a, dirty)
                 applied.append(a.client_event_id)
             except HTTPException as exc:
                 failed.append({"client_event_id": a.client_event_id, "detail": exc.detail})
@@ -414,6 +425,12 @@ def sync(payload: SyncIn):
                 conn.execute(
                     "DELETE FROM note WHERE user_id=? AND card_id=?", (uid, card_id)
                 )
+
+        # 亂序抵達的卡整段重算。放在迴圈外：同一張卡在一批裡被碰好幾次時，
+        # 每碰一次重算一次是白工，而且中間那些結果反正都會被最後一次覆蓋。
+        cfg = _cfg(conn, uid)
+        for card_id in sorted(dirty):
+            db.rebuild_card(conn, uid, card_id, _question(card_id)["deck"], cfg)
 
         # 刻意在寫入交易內取快照：回傳的狀態必須剛好等於這批補送的結果，
         # 出了交易再讀就可能夾雜別台裝置插進來的寫入。代價是寫鎖多握一小段。
