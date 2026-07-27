@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# driver-license 進度 DB 每日備份 → 本地輪替 + AWS S3。
+#
+# 為什麼一定要用 sqlite3 .backup 而不是 cp／tar：
+#   這個 DB 開 WAL 模式，主檔可以長期停在 4KB 而所有已提交的資料都還在 app.db-wal 裡
+#   （實測 2026-07-27：app.db 4096 bytes、app.db-wal 197792 bytes）。直接複製主檔會拿到
+#   一個「語法正確但幾乎空白」的 DB，而且完全不會報錯 —— 是最惡劣的那種備份失敗。
+#   .backup 走 SQLite 的線上備份 API，會把 WAL 的內容一起收斂進快照，且不必停服務。
+#   （kg_backup.sh 排除 *-wal/*-shm 是對的，因為它備份整個目錄、主檔本身是完整的；
+#     這裡只備份單一 DB 檔，語義不同，不能照抄。）
+#
+# 產出：
+#   本地 $DATA_DIR/backups/app-YYYY-MM-DD.db.gz  （保留 $KEEP 份，就地快速還原用）
+#   S3   s3://$BUCKET/driver-license/YYYY-MM-DD.db.gz （異地，擋硬體整台掛掉）
+#
+# 每次執行寫一行稽核 log：<timestamp> exit=<rc> bytes=<size> sha256=<hash> key=<s3 key>
+#
+# 還原：
+#   gunzip -c app-2026-07-27.db.gz > ~/driver-license-data/app.db
+#   rm -f ~/driver-license-data/app.db-wal ~/driver-license-data/app.db-shm
+#   launchctl kickstart -k gui/$(id -u)/com.driverlicense.server
+set -euo pipefail
+
+DATA_DIR="${DL_DATA_DIR:-$HOME/driver-license-data}"
+BUCKET="${DL_BACKUP_BUCKET:-butler-backups-967512079054}"
+REGION="${DL_BACKUP_REGION:-ap-northeast-1}"
+LOG="${DL_BACKUP_LOG:-$HOME/Library/Logs/driver-license-backup.log}"
+KEEP="${DL_BACKUP_KEEP:-14}"
+
+DB="$DATA_DIR/app.db"
+OUT_DIR="$DATA_DIR/backups"
+DATE="$(date -u +%Y-%m-%d)"
+DEST="$OUT_DIR/app-${DATE}.db.gz"
+KEY="driver-license/${DATE}.db.gz"
+
+mkdir -p "$OUT_DIR" "$(dirname "$LOG")"
+log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >>"$LOG"; }
+trap 'rc=$?; [[ $rc -eq 0 ]] || log "exit=$rc (unexpected)"; exit $rc' ERR
+
+if [[ ! -f "$DB" ]]; then
+  log "exit=2 missing db: $DB"
+  exit 2
+fi
+
+TMP="$(mktemp -t dl-backup)"
+trap 'rm -f "$TMP" "$TMP.gz"' EXIT
+
+# .backup 到暫存檔再壓縮。不串流是刻意的：要在上傳前先驗證這份快照真的開得起來。
+sqlite3 "$DB" ".backup '$TMP'"
+
+# 完整性驗證 —— 備份最常見的失敗是「檔案有了但內容是壞的」。沒驗過就不算備份。
+INTEGRITY="$(sqlite3 "$TMP" 'PRAGMA integrity_check;' | head -1)"
+if [[ "$INTEGRITY" != "ok" ]]; then
+  log "exit=3 integrity_check failed: $INTEGRITY"
+  exit 3
+fi
+CARDS="$(sqlite3 "$TMP" 'SELECT COUNT(*) FROM card;')"
+EVENTS="$(sqlite3 "$TMP" 'SELECT COUNT(*) FROM review_event;')"
+if [[ "$CARDS" -eq 0 ]]; then
+  log "exit=4 snapshot has zero cards — refusing to overwrite a good backup with an empty one"
+  exit 4
+fi
+
+gzip -9 -c "$TMP" >"$TMP.gz"
+mv "$TMP.gz" "$DEST"
+SIZE="$(wc -c <"$DEST" | tr -d ' ')"
+SHA="$(shasum -a 256 "$DEST" | awk '{print $1}')"
+
+# 本地輪替：只留最近 $KEEP 份
+ls -1t "$OUT_DIR"/app-*.db.gz 2>/dev/null | tail -n "+$((KEEP + 1))" | while read -r old; do
+  rm -f "$old"
+done
+
+rc=0
+if command -v aws >/dev/null 2>&1; then
+  aws s3 cp "$DEST" "s3://${BUCKET}/${KEY}" --region "$REGION" --no-progress >/dev/null || rc=$?
+else
+  rc=5
+fi
+
+log "exit=$rc bytes=$SIZE sha256=$SHA cards=$CARDS events=$EVENTS key=$KEY"
+exit "$rc"

@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  driver-license 進度 DB 每日備份（felix 常駐機）。
+
+  跑 ops/backup.sh：sqlite3 .backup 取一致快照 → 驗 integrity_check → gzip
+  → 本地保留 14 份 + 上傳 S3 butler-backups-967512079054/driver-license/。
+
+  時間錯開 kg（11:00）避開同時上傳，設 11:20 台北時間。
+  StartCalendarInterval 用「本機時間」，felix 是 Asia/Taipei。
+
+  部署：
+    cp deploy/com.driverlicense.backup.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.driverlicense.backup.plist
+  改 plist 要 bootout 再 bootstrap（kickstart 不重讀 plist）。
+  手動跑一次：launchctl kickstart -k gui/$(id -u)/com.driverlicense.backup
+
+  身分：沿用 kg 的 default profile（單帳號 967512079054 admin，見 ~/.aws/credentials）。
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.driverlicense.backup</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/chenliangyu/project/driver-license/ops/backup.sh</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>DL_DATA_DIR</key>
+        <string>/Users/chenliangyu/driver-license-data</string>
+        <key>DL_BACKUP_LOG</key>
+        <string>/Users/chenliangyu/Library/Logs/driver-license-backup.log</string>
+    </dict>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>11</integer>
+        <key>Minute</key>
+        <integer>20</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/chenliangyu/Library/Logs/driver-license-backup.launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/chenliangyu/Library/Logs/driver-license-backup.launchd.err.log</string>
+</dict>
+</plist>
