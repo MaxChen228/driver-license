@@ -12,9 +12,10 @@
 //
 // 改了 static/ 底下任何檔案就把 VERSION 加一，否則舊 SW 會繼續餵舊的 shell。
 
-const VERSION = "v2";
+const VERSION = "v3";
 const SHELL_CACHE = `shell-${VERSION}`;
-const ASSET_CACHE = `assets-${VERSION}`;   // 題庫與圖片：內容不變，跨版本沿用
+const ASSET_CACHE = `assets-${VERSION}`;   // 題庫與圖片；換版本會整批重抓，
+                                           // 這是題庫改版時唯一能讓舊圖失效的手段
 
 const SHELL = [
   "/",
@@ -33,14 +34,19 @@ const SHELL = [
 
 const BANKS = ["/data/car.json", "/data/moto.json"];
 
+// 安裝時一律繞過瀏覽器的 HTTP 快取。addAll() 預設會先問 HTTP 快取，
+// 拿到啟發式新鮮度留下來的舊檔案，新版 shell 就會裝進舊的 CSS／JS。
+// 伺服器那邊也送了 no-cache（app/main.py 的 _Static），兩層都補上。
+const noHttpCache = (url) => new Request(url, { cache: "reload" });
+
 self.addEventListener("install", (e) => {
   e.waitUntil(
     (async () => {
       const shell = await caches.open(SHELL_CACHE);
-      await shell.addAll(SHELL);
+      await shell.addAll(SHELL.map(noHttpCache));
       // 題庫跟 shell 一起裝好：沒有題目的離線 app 是沒有意義的
       const assets = await caches.open(ASSET_CACHE);
-      await assets.addAll(BANKS);
+      await assets.addAll(BANKS.map(noHttpCache));
       await self.skipWaiting();
     })()
   );

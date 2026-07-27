@@ -156,3 +156,35 @@ def test_stats_shape(client):
     assert len(s["forecast_14d"]) == 14
     assert s["streak_days"] >= 1
     assert 0.0 <= s["accuracy"] <= 1.0
+
+
+def test_app_shell_is_never_heuristically_cached(client):
+    """app shell 的每個檔案都必須明示 cache-control。
+
+    少了它，瀏覽器會用「啟發式新鮮度」自己決定有效期（last-modified 至今的
+    10%），而 service worker 安裝時的 addAll() 也會先問 HTTP 快取 —— 結果是
+    新版 shell 把舊的 CSS 裝進新的 Cache Storage，新 HTML 配舊樣式，而且會
+    留在那個版本裡直到下次改版。踩過一次，所以釘在測試裡。
+    """
+    for path in ["/", "/sw.js", "/static/style.css", "/static/app.js",
+                 "/static/srs.js", "/static/store.js", "/data/car.json",
+                 "/manifest.webmanifest"]:
+        r = client.get(path)
+        assert r.status_code == 200, path
+        assert r.headers.get("cache-control") == "no-cache", path
+
+
+def test_service_worker_shell_list_matches_disk(client):
+    """sw.js 列的 SHELL 每個 URL 都要真的取得到。
+
+    少一個檔案 addAll() 會整批失敗（規格如此），結果是 SW 永遠裝不起來、
+    離線功能靜靜地失效，而且不會有任何錯誤訊息浮到畫面上。
+    """
+    import re
+
+    sw = client.get("/sw.js").text
+    shell = re.search(r"const SHELL = \[(.*?)\];", sw, re.S).group(1)
+    urls = re.findall(r'"([^"]+)"', shell)
+    assert "/static/style.css" in urls and "/static/fonts/archivo-latin.woff2" in urls
+    for u in urls:
+        assert client.get(u).status_code == 200, u

@@ -569,8 +569,30 @@ def put_settings(payload: SettingsIn):
 # ---------------------------------------------------------------- static
 
 
-app.mount("/images", StaticFiles(directory=DATA_DIR / "images"), name="images")
-app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
+class _Static(StaticFiles):
+    """StaticFiles 加上明確的 cache-control: no-cache。
+
+    預設只送 etag / last-modified、不送 cache-control，瀏覽器於是套用「啟發式
+    新鮮度」——沒有明示有效期時，拿 last-modified 至今時間的 10% 當有效期。
+    對一個放了幾個月的 style.css 來說那是好幾天。
+
+    後果不是「使用者晚幾天看到新版」而已：service worker 安裝時
+    `cache.addAll(SHELL)` 的請求也會先過 HTTP 快取，於是新版 SW 把舊的 CSS
+    裝進新的 Cache Storage，變成新 HTML ＋ 新 JS ＋ 舊 CSS 的組合，而且會一直
+    留在那個版本裡。實際踩過一次。
+
+    no-cache 不是不快取，是每次都拿 etag 跟伺服器對帳（幾乎都回 304）。
+    離線能力本來就由 SW 的 Cache Storage 提供，不靠瀏覽器這層。
+    """
+
+    async def get_response(self, path, scope):
+        resp = await super().get_response(path, scope)
+        resp.headers["cache-control"] = "no-cache"
+        return resp
+
+
+app.mount("/images", _Static(directory=DATA_DIR / "images"), name="images")
+app.mount("/static", _Static(directory=ROOT / "static"), name="static")
 
 
 @app.get("/data/{deck}.json")
@@ -611,7 +633,9 @@ def service_worker():
 @app.get("/manifest.webmanifest")
 def web_manifest():
     return FileResponse(
-        ROOT / "static" / "manifest.webmanifest", media_type="application/manifest+json"
+        ROOT / "static" / "manifest.webmanifest",
+        media_type="application/manifest+json",
+        headers={"cache-control": "no-cache"},
     )
 
 
