@@ -1,0 +1,128 @@
+{
+ "deck": "car",
+ "kind": "hazard",
+ "source": "1150605-危險感知影片題(調整影片順序).pdf",
+ "count": 10,
+ "questions": [
+  {
+   "no": "危感-01",
+   "answer": 1,
+   "video": "202601",
+   "stem": "對向的車輛持續顯示方向燈並未減速接近路口，你應該？",
+   "options": [
+    "先減速，並確認安全後再行駛",
+    "按鳴喇叭或變換燈光，提醒該車輛讓你先通過",
+    "直行車優先，預判對方會讓我先行"
+   ],
+   "share_url": "https://space2.thb.gov.tw/d/s/18RCOJhYA7zb0ddUn5cirG3IEQPtV5q3/w0XjZBCrh6cqzzFZIhd5a-DpOcCtAxnM-ibGA2PqiOw0"
+  },
+  {
+   "no": "危感-02",
+   "answer": 3,
+   "video": "202602",
+   "stem": "行經無號誌路口時，發現橫向有機車接近且未減速，你應該？",
+   "options": [
+    "加速通過避免與對方衝突",
+    "直行車優先，應預判對方會讓我先行",
+    "減速並預作停車之準備"
+   ],
+   "share_url": "https://space2.thb.gov.tw/d/s/18RCOLWWVu0g030ejVfAj1FuItqdfmeU/qNiV4LIsdz6xRJJd0Uj9tom9NXRtarGw-PrKAvgujOw0"
+  },
+  {
+   "no": "危感-03",
+   "answer": 2,
+   "video": "202603",
+   "stem": "從照後鏡中發現有車輛接近並顯示方向燈，你應該？",
+   "options": [
+    "加速駛離避免與對方衝突",
+    "放開油門減速因應",
+    "對方不一定會影響我，不必理會"
+   ],
+   "share_url": "https://space2.thb.gov.tw/d/s/18WqUzA66D7uWe8DGp9LpkNQkBbovX74/gmRmhBleoWTWGUY6QvoWrFKW7YKXpYx0-cbsgrk8EQA0"
+  },
+  {
+   "no": "危感-04",
+   "answer": 1,
+   "video": "202604",
+   "stem": "綠燈起步時，發現橫向的車輛似乎沒有減速跡象，並快速逼近路口，你應該？",
+   "options": [
+    "暫緩起步並煞停，確認該橫向車輛停下或通過後再行駛",
+    "預判對方會於路口煞停，維持正常速度起步即可",
+    "因為我是綠燈，應立即起步並按喇叭提醒對方停車"
+   ],
+   "share_url": "https://space2.thb.gov.tw/d/s/18WqV0v64BdGmS7Xzd5ZREbF4ff7J0sL/sFnMTn9_OBH29Ify0dFm7cly_Nr1HPDz-FLzg8lQEQA0"
+  },
+  {
+   "no": "危感-05",
+   "answer": 2,
+   "video": "202605",
+   "stem": "請選出影片中的視線遮蔽處，可能會有車輛駛出？",
+   "options": [
+    "人行道上的柱子",
+    "對向車輛的後方",
+    "路旁的停車"
+   ],
+   "share_url": "https://space2.thb.gov.tw/d/s/18RCO8LsZho7HoGZ4M1DmMMVbMnhK4di/DElLZdVFNCTfxFa5uxfVRdGn9Z-2FVqi-kbQgBDejOw0"
+  },
+  {
+   "no": "危感-06",
+   "answer": 1,
+   "video": "202606",
+   "stem": "右轉時，路口的行人穿越道上有行人通行，你應該？",
+   "options": [
+    "減速暫停讓行人先行",
+    "保持速度，並在行人進入本車行駛路線前通過",
+    "按鳴喇叭，提醒行人本車先行"
+   ],
+   "share_url": "https://space2.thb.gov.tw/d/s/18RCOAPkroD3cj86oVvdHh6eAzfbDwru/t_HVnpaqDHFTtPAFGdL04-nhnwYk09ig-C7WgnUCjOw0"
+  },
+  {
+   "no": "危感-07",
+   "answer": 3,
+   "video": "202607",
+   "stem": "路邊有行人可能會穿越道路，你應該？",
+   "options": [
+    "按鳴喇叭或變換燈光以警示行人",
+    "保持速度，直接閃避",
+    "預先減速，讓行人先通行"
+   ],
+   "share_url": "https://space2.thb.gov.tw/d/s/18RCOCaRX28pQteNbFtxtHYUPbBi84xy/3oL6s21agbgdR5rV9HH7chZJwOSiTsD0-kLXAhEqjOw0"
+  },
+  {
+   "no": "危感-08",
+   "answer": 1,
+   "video": "202608",
+   "stem": "行駛在高速公路上，右前方的車輛向左變換車道，你應該？",
+   "options": [
+    "先判斷安全距離是否足夠，並預先減速",
+    "不須理會，對方會自行判斷與本車的安全距離",
+    "按鳴喇叭或連續變換燈光，提醒對方你要先行"
+   ],
+   "share_url": "https://space2.thb.gov.tw/d/s/18RCOEqNl69CLEiUJONpbCaxLmCl6P9W/EILxeP4ao1SJ6oBisHfPSQDDKtWGHyf9-2bUg6lGjOw0"
+  },
+  {
+   "no": "危感-09",
+   "answer": 3,
+   "video": "202609",
+   "stem": "準備在路邊起駛時，你應該？",
+   "options": [
+    "利用照後鏡確認後方沒有來車",
+    "顯示方向燈",
+    "以上皆是"
+   ],
+   "share_url": "https://space2.thb.gov.tw/d/s/18RCOGIn022s96VEEEmpm41FTs0bSJqe/ebOEiu66XWZGZMXiOTEYNr8zqRutUXpt-gLZgqlyjOw0"
+  },
+  {
+   "no": "危感-10",
+   "answer": 3,
+   "video": "202610",
+   "stem": "準備在路邊左轉彎時，你應該？",
+   "options": [
+    "顯示方向燈",
+    "確認行人穿越道線上沒有行人",
+    "以上皆是"
+   ],
+   "share_url": "https://space2.thb.gov.tw/d/s/18RCOHWihKbDJm2hAaqdqCjJXj54t40x/U174b78Ed4R-7xaae5f6OSyNxdFBfn4O--LagTGajOw0"
+  }
+ ]
+}
