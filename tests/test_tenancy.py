@@ -6,11 +6,11 @@ Phase 4 接上登入之前，HTTP 層永遠只看得到一個帳號，所以「A
 """
 
 import importlib
-import os
 
 import pytest
 
 from app import srs
+from tests.conftest import data_dir_env
 
 CFG = srs.PRESETS["relaxed"]
 NOW = srs.utcnow()
@@ -18,12 +18,12 @@ NOW = srs.utcnow()
 
 @pytest.fixture()
 def dbmod(tmp_path):
-    os.environ["DL_DATA_DIR"] = str(tmp_path)
-    import app.db
+    with data_dir_env(tmp_path):
+        import app.db
 
-    m = importlib.reload(app.db)
-    m.init()
-    return m
+        m = importlib.reload(app.db)
+        m.init()
+        yield m
 
 
 @pytest.fixture()

@@ -16,6 +16,8 @@ CFG = srs.PRESETS["relaxed"]
 def _insert_ghosts(data_dir, n):
     """插進 n 筆題庫裡不存在的題號，模擬題庫改版後的殘留。"""
     conn = sqlite3.connect(data_dir / "app.db")
+    # 與 _current_user 同源，不假設遷移一定給到 id 1
+    uid = conn.execute("SELECT id FROM user ORDER BY id LIMIT 1").fetchone()[0]
     now = srs.utcnow()
     state = srs.apply_feedback(srs.CardState.fresh(CFG), True, CFG, now)
     for i in range(n):
@@ -23,8 +25,8 @@ def _insert_ghosts(data_dir, n):
             """INSERT INTO card_state(user_id, card_id, deck, review_interval_hours,
                                       next_review_at, last_reviewed_at, review_count,
                                       lapse_count, review_streak, last_review_feedback)
-               VALUES(1, ?, 'car', ?, ?, ?, 1, 0, 1, 1)""",
-            (f"GHOST{i}", state.review_interval_hours,
+               VALUES(?, ?, 'car', ?, ?, ?, 1, 0, 1, 1)""",
+            (uid, f"GHOST{i}", state.review_interval_hours,
              db.iso(state.next_review_at), db.iso(state.last_reviewed_at)),
         )
     conn.commit()

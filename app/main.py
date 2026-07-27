@@ -233,7 +233,7 @@ def _record(conn, user_id: int, q: dict, chosen: int | None, correct: bool, reme
     db.put_state(conn, user_id, q["id"], q["deck"], after)
     db.log_event(
         conn,
-        user_id=user_id,
+        user_id,
         card_id=q["id"],
         deck=q["deck"],
         reviewed_at=db.iso(now),
@@ -329,7 +329,9 @@ def regrade(payload: RegradeIn):
             review_streak=ev["streak_before"],
             last_review_feedback=ev["feedback_before"],
         )
-        conn.execute("DELETE FROM review_event WHERE id=?", (ev["id"],))
+        conn.execute(
+            "DELETE FROM review_event WHERE user_id=? AND id=?", (uid, ev["id"])
+        )
         return _record(
             conn, uid, q, ev["chosen"], bool(ev["correct"]), False, ev["elapsed_ms"], before,
             db.parse(ev["reviewed_at"]), ev["client_event_id"],
@@ -529,7 +531,7 @@ def browse(
 
 @app.get("/api/stats")
 def stats(deck: str = Query(...)):
-    _deck_or_404(deck)
+    d = _deck_or_404(deck)
     with db.session() as conn:
         uid = _current_user(conn)
         now = _now(conn, uid)
@@ -537,7 +539,8 @@ def stats(deck: str = Query(...)):
         # 14 日到期預測（今天以前全部收攏進今天，照 kg 的 forecast 做法）
         forecast: Counter[str] = Counter()
         for r in _rows(conn, uid, deck):
-            if r["review_count"] == 0:
+            # 題庫改版刪掉的題號會留下孤兒列，別讓它們出現在預測裡
+            if r["review_count"] == 0 or r["card_id"] not in d.by_id:
                 continue
             nxt = db.parse(r["next_review_at"])
             if nxt is None:
@@ -567,7 +570,6 @@ def stats(deck: str = Query(...)):
                ORDER BY lapse_count DESC LIMIT 20""",
             (uid, deck),
         ).fetchall()
-        d = DECK_DATA[deck]
         by_cat: Counter[str] = Counter()
         for r in conn.execute(
             "SELECT card_id, lapse_count FROM card_state"
@@ -591,7 +593,11 @@ def stats(deck: str = Query(...)):
             for i in range(14)
         ],
         "activity": activity[-180:],
-        "worst_cards": [{"id": r["card_id"], "lapses": r["lapse_count"]} for r in worst],
+        "worst_cards": [
+            {"id": r["card_id"], "lapses": r["lapse_count"]}
+            for r in worst
+            if r["card_id"] in d.by_id
+        ],
         "worst_categories": [{"category": k, "lapses": v} for k, v in by_cat.most_common(10)],
     }
 

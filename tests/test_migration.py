@@ -11,6 +11,8 @@ import sqlite3
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.conftest import data_dir_env
+
 # v1 的 schema 原文（commit 493ba62 之前的 app/db.py SCHEMA，加上當時的 ALTER）。
 # 刻意抄一份而不是 import 舊程式：遷移要能對付「真實存在過的檔案」，
 # 而那份 schema 已經不在程式碼裡了。
@@ -98,16 +100,16 @@ def _build_v1(path):
 def migrated(tmp_path):
     """建一個 v1 DB，讓 app 啟動時把它遷移掉，回傳 (TestClient, 連線工廠)。"""
     _build_v1(tmp_path / "app.db")
-    os.environ["DL_DATA_DIR"] = str(tmp_path)
     os.environ["DL_LEGACY_USERNAME"] = "legacy-owner"
-    import app.db
-    import app.main
-
-    importlib.reload(app.db)
-    main = importlib.reload(app.main)
     try:
-        with TestClient(main.app) as c:
-            yield c, lambda: sqlite3.connect(tmp_path / "app.db")
+        with data_dir_env(tmp_path):
+            import app.db
+            import app.main
+
+            importlib.reload(app.db)
+            main = importlib.reload(app.main)
+            with TestClient(main.app) as c:
+                yield c, lambda: sqlite3.connect(tmp_path / "app.db")
     finally:
         del os.environ["DL_LEGACY_USERNAME"]
 
@@ -170,15 +172,91 @@ def test_v1_tables_are_gone_and_version_is_stamped(migrated):
 
 def test_migration_is_idempotent(migrated):
     """再開一次 app 不能重跑遷移（會撞 UNIQUE username 或再搬一次事件）。"""
-    _, connect = migrated
     import app.db
 
+    _, connect = migrated
     before = connect().execute("SELECT COUNT(*) FROM review_event").fetchone()[0]
-    app.db.init()
-    app.db.init()
+
+    # 直接釘住守衛本身：v2 的 DB 再開，_upgrade_v1_to_v2 一次都不能被呼叫。
+    # 只比對事件數是釘不住的 —— 守衛拿掉後 _is_v1 找不到 card 表也會回 False，
+    # 走 _apply_schema 全 no-op，數字照樣不變，測試照樣綠。
+    called = []
+    original = app.db._upgrade_v1_to_v2
+    app.db._upgrade_v1_to_v2 = lambda conn: called.append(1)
+    try:
+        app.db.init()
+        app.db.init()
+    finally:
+        app.db._upgrade_v1_to_v2 = original
+
+    assert called == []
     conn = connect()
     assert conn.execute("SELECT COUNT(*) FROM review_event").fetchone()[0] == before
     assert conn.execute("SELECT COUNT(*) FROM user").fetchone()[0] == 1
+
+
+# 遷移把 v1 的表改名讓路，但索引不會跟著改名，而這四個名字 v1 與 v2 完全相同。
+# 沒有明確 DROP 的話：改名後舊索引仍佔著名字 → CREATE INDEX IF NOT EXISTS 靜默
+# no-op → DROP TABLE 把舊索引一起帶走 → 新表一個索引都沒有。而且下次重啟會把它們
+# 補回來，故障自己痊癒、永遠沒人發現。這是本次遷移最實際的失敗模式。
+EXPECTED_INDEXES = {
+    "idx_card_queue": "card_state",
+    "idx_event_day": "review_event",
+    "idx_event_card": "review_event",
+    "idx_event_client": "review_event",
+    "idx_session_user": "session",
+}
+
+
+def test_indexes_survive_the_rebuild(migrated):
+    _, connect = migrated
+    got = dict(
+        connect().execute(
+            "SELECT name, tbl_name FROM sqlite_master"
+            " WHERE type='index' AND sql IS NOT NULL"
+        ).fetchall()
+    )
+    assert got == EXPECTED_INDEXES
+
+
+def test_idempotency_gate_is_enforced_by_the_index_right_after_migrating(migrated):
+    """UNIQUE(user_id, client_event_id) 必須「當下」就生效，不是等下次重啟。
+
+    app 層的 event_exists 還在，所以就算索引沒了也看不出來 —— 直到兩個請求
+    同時補送同一筆，或有人繞過那道 SELECT。db 層的保證不能只是「遲早會有」。
+    """
+    import sqlite3
+
+    _, connect = migrated
+    conn = connect()
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO review_event(user_id, card_id, deck, reviewed_at, day_key,"
+            " correct, feedback, client_event_id)"
+            " VALUES(1,'C0001','car','2026-07-21T00:00:00+00:00','2026-07-21',1,1,'ev-1')"
+        )
+
+
+def test_unknown_schema_version_refuses_to_open(tmp_path):
+    """認不得的版本要大聲拒絕，不能靜默蓋章成最新版。
+
+    最危險的形狀是日後加了 SCHEMA_VERSION=3 卻只用 CREATE TABLE IF NOT EXISTS ——
+    對既有表毫無作用，欄位沒加、版本卻被蓋成 3，之後每次啟動都自認最新。
+    """
+    import importlib
+    import sqlite3
+
+    conn = sqlite3.connect(tmp_path / "app.db")
+    conn.execute("PRAGMA user_version=99")
+    conn.commit()
+    conn.close()
+
+    with data_dir_env(tmp_path):
+        import app.db
+
+        m = importlib.reload(app.db)
+        with pytest.raises(RuntimeError, match="比這份程式支援的"):
+            m.init()
 
 
 def test_regrade_still_works_on_migrated_events(migrated):

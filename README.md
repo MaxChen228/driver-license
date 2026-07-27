@@ -59,15 +59,32 @@ uv run pytest                                              # SRS + API
 uv run uvicorn app.main:app --host 127.0.0.1 --port 8006   # 本機
 ```
 
-進度 DB 在 **repo 外**（`$DL_DATA_DIR`，預設 `~/driver-license-data/app.db`），`git pull` / `reset` 不會動到。
+進度 DB 在 **repo 外**（`$DL_DATA_DIR`，預設 `~/driver-license-data/app.db`），`git pull` / `reset` 不會動到 —— 但**服務啟動時會就地遷移它**，見下。
+
+## 資料庫版本
+
+`PRAGMA user_version` 記 schema 版本，目前是 **2**（多租戶：每列都掛 `user_id`）。
+`app.main` 一被 import 就跑 `db.init()`，需要時就地遷移，**不可逆**（v1 的舊表會被 drop）。
+認不得的版本會直接拒絕開啟，不會靜默蓋章。
 
 ## 部署（felix）
 
 ```bash
 ssh chenliangyu@100.118.39.104
-cd ~/project/driver-license && git pull && uv sync
+cd ~/project/driver-license
+bash ops/backup.sh                 # 先備份：下一步可能觸發不可逆的 schema 遷移
+git pull && uv sync
 launchctl kickstart -k gui/$(id -u)/com.driverlicense.server
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8006/api/decks   # 應為 200
 ```
+
+**備份要在 `git pull` 之前**：`ops/backup.sh` 的健檢閘跟著 schema 走，先 pull 的話
+新版腳本會對上還沒遷移的舊 DB，直接 exit 5。
+
+⚠️ 服務的 `WorkingDirectory` 就是這個 repo，`KeepAlive=true` —— uvicorn 直接 import
+工作目錄裡的 `app/`。**在 felix 上編輯這個 repo 等於在動生產環境**：程序只要重啟一次
+（崩潰、kickstart、開機）就會載入當下磁碟上的程式碼，包含寫到一半的版本，並且照樣跑
+`db.init()`。要做長時間的修改，先 `launchctl bootout gui/$(id -u)/com.driverlicense.server`。
 
 - 改 `app/*.py` → `kickstart -k`
 - 改 `static/*`、`data/*` → 免重啟（StaticFiles / 啟動時載入的除外，改 JSON 仍需重啟）

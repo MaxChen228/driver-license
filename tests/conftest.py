@@ -14,27 +14,34 @@ from fastapi.testclient import TestClient
 
 
 @contextmanager
-def _fresh_client(data_dir):
-    """DB 路徑現在是每次 db.session() 呼叫 db_path() 現查的，不是 import 時綁死。
+def data_dir_env(data_dir):
+    """把 DL_DATA_DIR 指到臨時目錄，離開時還原。
 
-    所以離開時一定要把 DL_DATA_DIR 還原：否則一個還活著的 module_client 會在
-    後面的模組改掉環境變數之後，安靜地寫到別人的 DB 去。
+    DB 路徑是每次 db.session() 呼叫 db_path() 現查的，不是 import 時綁死 ——
+    不還原的話，一個還活著的 client 會在後面的模組改掉環境變數之後，
+    安靜地寫到別人的 DB 去。
     """
     prev = os.environ.get("DL_DATA_DIR")
     os.environ["DL_DATA_DIR"] = str(data_dir)
-    import app.db
-    import app.main
-
-    importlib.reload(app.db)
-    main = importlib.reload(app.main)
     try:
-        with TestClient(main.app) as c:
-            yield c
+        yield
     finally:
         if prev is None:
             os.environ.pop("DL_DATA_DIR", None)
         else:
             os.environ["DL_DATA_DIR"] = prev
+
+
+@contextmanager
+def _fresh_client(data_dir):
+    with data_dir_env(data_dir):
+        import app.db
+        import app.main
+
+        importlib.reload(app.db)
+        main = importlib.reload(app.main)
+        with TestClient(main.app) as c:
+            yield c
 
 
 @pytest.fixture()

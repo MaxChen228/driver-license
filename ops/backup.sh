@@ -57,9 +57,17 @@ fi
 # 健全性閘：至少要有一個帳號。不能用 card_state 的筆數 —— 惰性建列之後，
 # 一個剛註冊、還沒答過任何一題的帳號合法地是 0 列，拿它當閘會誤殺真備份。
 # 帳號表則是「DB 有東西」的最低保證：0 個帳號代表拿到的是空殼或壞檔。
-USERS="$(sqlite3 "$TMP" 'SELECT COUNT(*) FROM user;')"
-CARDS="$(sqlite3 "$TMP" 'SELECT COUNT(*) FROM card_state;')"
-EVENTS="$(sqlite3 "$TMP" 'SELECT COUNT(*) FROM review_event;')"
+USERS="$(sqlite3 "$TMP" 'SELECT COUNT(*) FROM user;' 2>&1 || true)"
+CARDS="$(sqlite3 "$TMP" 'SELECT COUNT(*) FROM card_state;' 2>/dev/null || echo '?')"
+EVENTS="$(sqlite3 "$TMP" 'SELECT COUNT(*) FROM review_event;' 2>/dev/null || echo '?')"
+# 先驗「拿到的是一個數字」再驗「數字不是 0」。這兩件事的死因完全不同：
+# 非數字代表 schema 不對（多半是 git pull 換了這個腳本、但服務還沒 kickstart
+# 遷移，DB 仍是 v1 沒有 user 表），0 代表快照是空殼。
+# 不先分開的話，bash 算術語境會把空字串當 0，於是 schema 不符會被誤報成「零帳號」。
+if ! [[ "$USERS" =~ ^[0-9]+$ ]]; then
+  log "exit=5 cannot read user count (schema mismatch? not migrated yet): $USERS"
+  exit 5
+fi
 if [[ "$USERS" -eq 0 ]]; then
   log "exit=4 snapshot has zero users — refusing to overwrite a good backup with an empty one"
   exit 4

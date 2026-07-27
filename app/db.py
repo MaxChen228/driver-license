@@ -178,6 +178,20 @@ def _upgrade_v1_to_v2(conn: sqlite3.Connection) -> None:
     for t in _V1_TABLES:
         conn.execute(f"ALTER TABLE {t} RENAME TO {t}_v1")
 
+    # 索引不會跟著表改名 —— idx_card_queue / idx_event_day / idx_event_card /
+    # idx_event_client 四個名字在 v1 與 v2 完全相同，改名後它們仍佔著那四個名字、
+    # 只是 tbl_name 指向 _v1 表。接下來 _apply_schema 的 CREATE INDEX IF NOT EXISTS
+    # 就會因為同名而靜默 no-op，最後 DROP TABLE 又把它們一起帶走 ——
+    # 結果是新表一個索引都沒有，包括那道 UNIQUE(user_id, client_event_id) 冪等閘。
+    # 而且下一次重啟時 version>=2 的分支會把索引補回來，故障會自我痊癒，
+    # 永遠不會有人發現曾經發生過。所以要在建新 schema 之前先把它們清掉。
+    for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND sql IS NOT NULL"
+        f" AND tbl_name IN ({','.join('?' * len(_V1_TABLES))})",
+        tuple(f"{t}_v1" for t in _V1_TABLES),
+    ).fetchall():
+        conn.execute(f'DROP INDEX IF EXISTS "{r["name"]}"')
+
     _apply_schema(conn)
 
     username = os.environ.get("DL_LEGACY_USERNAME", "max")
@@ -214,10 +228,22 @@ def _upgrade_v1_to_v2(conn: sqlite3.Connection) -> None:
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
+    """版本不認得就拒絕開，不要靜默蓋章。
+
+    最危險的形狀是「未來把 SCHEMA_VERSION 加到 3、在既有表加了欄位」：
+    CREATE TABLE IF NOT EXISTS 對既有表完全無作用，於是欄位沒加、版本卻被蓋成 3，
+    之後每次啟動都認為自己是最新的。寧可開不起來，也不要帶著缺欄位的 DB 跑。
+    """
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if version >= SCHEMA_VERSION:
+    if version == SCHEMA_VERSION:
         _apply_schema(conn)  # 新增表／索引時補齊，已存在的不動
         return
+    if version > SCHEMA_VERSION:
+        raise RuntimeError(
+            f"DB schema v{version} 比這份程式支援的 v{SCHEMA_VERSION} 新，拒絕開啟"
+        )
+    if version != 0:
+        raise RuntimeError(f"沒有 v{version} → v{SCHEMA_VERSION} 的遷移路徑")
     if _is_v1(conn):
         _upgrade_v1_to_v2(conn)
     else:
@@ -417,7 +443,10 @@ def all_states(conn: sqlite3.Connection, user_id: int) -> list[dict]:
 # ---------------------------------------------------------------- events
 
 
-def log_event(conn: sqlite3.Connection, **kw) -> None:
+def log_event(conn: sqlite3.Connection, user_id: int, **kw) -> None:
+    """user_id 是具名參數而不是塞在 **kw 裡：這一層的規矩是「簽名逼你指名擁有者」，
+    唯一的例外就是唯一會被漏掉的地方。"""
+    kw = {"user_id": user_id, **kw}
     cols = ",".join(kw)
     conn.execute(
         f"INSERT INTO review_event({cols}) VALUES({','.join('?' * len(kw))})",
