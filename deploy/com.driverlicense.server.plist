@@ -6,7 +6,14 @@
      改 app/*.py：launchctl kickstart -k gui/$(id -u)/com.driverlicense.server
      改本 plist：必須 bootout 再 bootstrap（kickstart 不重讀 plist）。
 
-     對外入口是 tailscale serve（TLS 終結在 tailscaled，Let's Encrypt 真憑證）：
+     ⚠️ WorkingDirectory 就是 repo 本身，uvicorn 直接 import 工作目錄裡的 app/。
+     在 felix 上編輯這個 repo 等於在動生產環境 —— 程序只要重啟一次（崩潰、
+     kickstart、開機）就會載入當下磁碟上的程式碼，包含寫到一半的版本，
+     而且照樣會跑 db.init() 就地遷移資料庫。長時間改動前先 bootout。
+
+     對外入口有兩條：
+     (1) Cloudflare Tunnel → https://drive.wordnexus.lol（公網，帳號制）
+     (2) tailscale serve（TLS 終結在 tailscaled，Let's Encrypt 真憑證）：
        tailscale serve --bg --https=443 http://127.0.0.1:8006
        → https://s-macbook-air.tail8c391d.ts.net/    （tailnet only，非 funnel）
      為什麼非 HTTPS 不可：PWA 的 service worker 只在安全來源註冊，
@@ -21,17 +28,12 @@
 <dict>
   <key>Label</key>
   <string>com.driverlicense.server</string>
+  <!-- 走 wrapper 而不是直接叫 uvicorn：憑證要從 ~/.secrets 讀進環境變數，
+       而這個 plist 是進 repo 的，不能放秘密。實際指令見 deploy/run-server.sh。 -->
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/chenliangyu/project/driver-license/.venv/bin/python</string>
-    <string>-m</string>
-    <string>uvicorn</string>
-    <string>app.main:app</string>
-    <!-- 只綁 loopback：唯一入口是 tailscale serve，見檔頭 -->
-    <string>--host</string>
-    <string>127.0.0.1</string>
-    <string>--port</string>
-    <string>8006</string>
+    <string>/bin/bash</string>
+    <string>/Users/chenliangyu/project/driver-license/deploy/run-server.sh</string>
   </array>
   <key>WorkingDirectory</key>
   <string>/Users/chenliangyu/project/driver-license</string>

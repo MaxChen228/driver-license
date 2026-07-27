@@ -9,9 +9,7 @@ import os
 import sqlite3
 
 import pytest
-from fastapi.testclient import TestClient
-
-from tests.conftest import data_dir_env
+from tests.conftest import TEST_PASSWORD, data_dir_env, make_client
 
 
 def app_db_version():
@@ -114,17 +112,44 @@ def migrated(tmp_path):
 
             importlib.reload(app.db)
             main = importlib.reload(app.main)
-            with TestClient(main.app) as c:
+            # 遷移建出來的帳號 password_hash 是 NULL（還不能登入），
+            # 正式流程是跑 tools/useradmin.py set-password 認領它
+            import app.auth
+
+            conn = sqlite3.connect(tmp_path / "app.db")
+            conn.execute("UPDATE user SET password_hash=? WHERE id=1",
+                         (app.auth.hash_password(TEST_PASSWORD),))
+            conn.commit()
+            conn.close()
+
+            with make_client(main) as c:
+                c.post("/api/auth/login",
+                       json={"username": "legacy-owner", "password": TEST_PASSWORD})
                 yield c, lambda: sqlite3.connect(tmp_path / "app.db")
     finally:
         del os.environ["DL_LEGACY_USERNAME"]
 
 
-def test_legacy_progress_lands_on_one_account(migrated):
-    _, connect = migrated
-    conn = connect()
-    users = conn.execute("SELECT id, username, password_hash FROM user").fetchall()
-    assert users == [(1, "legacy-owner", None)]  # 還不能登入，等 useradmin 設密碼
+def test_legacy_progress_lands_on_one_account(tmp_path):
+    """遷移建出來的帳號還不能登入 —— password_hash 是 NULL，等 useradmin 認領。
+
+    刻意不用 migrated fixture：那個 fixture 為了讓後續測試能登入，會補上密碼。
+    """
+    _build_v1(tmp_path / "app.db")
+    os.environ["DL_LEGACY_USERNAME"] = "legacy-owner"
+    try:
+        with data_dir_env(tmp_path):
+            import app.db
+
+            importlib.reload(app.db).init()
+    finally:
+        del os.environ["DL_LEGACY_USERNAME"]
+
+    conn = sqlite3.connect(tmp_path / "app.db")
+    users = conn.execute(
+        "SELECT id, username, password_hash, recovery_hash FROM user"
+    ).fetchall()
+    assert users == [(1, "legacy-owner", None, None)]
 
 
 def test_seeded_empty_cards_are_dropped_but_real_progress_is_byte_identical(migrated):

@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "台灣汽機車駕照筆試刷題 app（間隔重複，felix 內網）"
 requires-python = ">=3.13"
 dependencies = [
+    "argon2-cffi>=25.1.0",
     "fastapi>=0.115",
+    "httpx>=0.28.1",
     "uvicorn[standard]>=0.32",
 ]
 

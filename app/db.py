@@ -315,7 +315,6 @@ def init(path: Path | None = None) -> None:
         conn.execute("BEGIN IMMEDIATE")
         try:
             _migrate(conn)
-            _ensure_default_user(conn)
         except BaseException:
             _rollback(conn)
             raise
@@ -351,29 +350,6 @@ def session(write: bool = False):
 
 
 # ---------------------------------------------------------------- users
-
-
-def _ensure_default_user(conn: sqlite3.Connection) -> None:
-    """全新 DB 也要有一個帳號可以掛資料。在 init() 裡建，不在請求路徑上建 ——
-    唯讀端點若要順手 INSERT，就得把 BEGIN DEFERRED 升級成寫入交易，WAL 下會
-    在剛好有別的寫入者 commit 時拿到 SQLITE_BUSY_SNAPSHOT。
-    """
-    if conn.execute("SELECT 1 FROM user LIMIT 1").fetchone():
-        return
-    conn.execute(
-        "INSERT INTO user(username, created_at) VALUES(?, ?)",
-        (os.environ.get("DL_LEGACY_USERNAME", "max"), iso(datetime.now(timezone.utc))),
-    )
-
-
-def default_user_id(conn: sqlite3.Connection) -> int:
-    """尚未接上登入之前的「目前使用者」。
-
-    Phase 4 接上 session cookie 後，這個函式連同 _ensure_default_user 與
-    main._current_user 一起刪掉；在那之前它讓單使用者行為與 v1 完全一致
-    （遷移過來的進度就是 user 1）。
-    """
-    return conn.execute("SELECT id FROM user ORDER BY id LIMIT 1").fetchone()["id"]
 
 
 # ---------------------------------------------------------------- card state

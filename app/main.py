@@ -1,40 +1,60 @@
 """driver-license —— 駕照筆試刷題 app。
 
-felix 內網服務，綁 Tailscale 介面（100.118.39.104:8006），tailnet 即邊界、無認證。
-絕不掛 Cloudflare Tunnel。
+跑在 felix，綁 127.0.0.1:8006。對外有兩條路：tailnet 內的 tailscale serve，
+以及 Cloudflare Tunnel（drive.wordnexus.lol）。後者推翻了本專案早期
+「tailnet 即邊界、無認證、絕不掛 CF Tunnel」的決定 —— 邊界改由這一層自己守。
+
+身分模型有兩種，刻意的：
+  匿名  題庫、SRS、狀態全部在瀏覽器（IndexedDB），伺服器一列都不寫。
+        公網上的未認證流量因此碰不到 DB，防濫用面歸零。
+  帳號  只為了跨裝置同步而存在。登入後伺服器才是權威來源。
 """
 
 from __future__ import annotations
 
+import logging
+import os
 import random
+import sqlite3
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import db, srs
+from . import auth, db, ratelimit, srs
 from .deck import DATA_DIR, DECKS, load_decks
 
 ROOT = Path(__file__).resolve().parent.parent
 
-app = FastAPI(title="driver-license", docs_url="/api/docs", redoc_url=None)
+# 正式站關掉 API 文件：它會把每一個端點、每一個欄位攤開給任何人看。
+# openapi_url 一定要一起關 —— 只關 docs_url 的話 /openapi.json 照樣公開，
+# 那才是真正有價值的那份（實測過：docs_url=None 時 /openapi.json 仍回 200）。
+IS_PROD = os.environ.get("DL_ENV") == "prod"
+
+app = FastAPI(
+    title="driver-license",
+    docs_url=None if IS_PROD else "/api/docs",
+    openapi_url=None if IS_PROD else "/openapi.json",
+    redoc_url=None,
+)
 
 DECK_DATA = load_decks()
 db.init()
 
+logging.getLogger("driver-license").info(
+    "env=%s docs=%s turnstile=%s",
+    "prod" if IS_PROD else "dev",
+    "off" if IS_PROD else "/api/docs",
+    "on" if os.environ.get("DL_TURNSTILE_SECRET") else "off",
+)
 
-def _current_user(conn) -> int:
-    """目前的使用者。
-
-    Phase 4 會把它換成 session cookie 查出來的身分；在那之前一律是遷移過來的
-    那個帳號，行為與單使用者時代完全一致。所有 db.* 都要求指名 user_id，
-    所以換掉這一個函式就等於換掉整個身分來源，不會有漏網的查詢。
-    """
-    return db.default_user_id(conn)
+# 只有登入的人有伺服器端資料，所以幾乎每個 API 都掛這個相依。
+# 型別上就拿不到「沒有 user 的 conn 操作」——db.* 每個函式都要求指名 user_id。
+CurrentUser = Depends(auth.require_user)
 
 
 def _cfg(conn, user_id: int) -> srs.ReviewSettings:
@@ -91,13 +111,246 @@ def _note(conn, user_id: int, card_id: str) -> str | None:
     return row["body"] if row else None
 
 
+# ---------------------------------------------------------------- 安全標頭 / CSRF
+
+
+@app.middleware("http")
+async def security_middleware(request: Request, call_next):
+    """兩件事：擋跨站寫入，以及送出安全標頭。
+
+    CSRF 這裡疊三層，沒有一層是多餘的：
+      1. cookie 是 SameSite=Lax —— 跨站的 POST 根本不會帶上它。
+      2. 不開 CORS —— 瀏覽器擋掉跨來源讀取結果。
+      3. 所有寫入要求 X-DL-Client 標頭 —— 自訂標頭會觸發 preflight，
+         而我們不回應 preflight，所以任何跨站表單／img 標籤式的偽造直接死在這裡。
+    第三層是唯一不依賴瀏覽器正確實作 SameSite 的一層，成本一行，留著。
+    """
+    if request.method in ("POST", "PUT", "PATCH", "DELETE") and \
+            request.url.path.startswith("/api/") and \
+            request.headers.get("x-dl-client") != "1":
+        return JSONResponse({"detail": "missing X-DL-Client"}, status_code=403)
+
+    response = await call_next(request)
+    csp = [
+        "default-src 'self'",
+        "img-src 'self' data:",
+        "style-src 'self'",
+        "connect-src 'self'",
+        "base-uri 'none'",
+        "form-action 'self'",
+        "frame-ancestors 'none'",
+    ]
+    # Turnstile 要載入 challenges.cloudflare.com 的 script 與 iframe。沒啟用就不要開這個口。
+    if TURNSTILE_SITEKEY:
+        csp.append("script-src 'self' https://challenges.cloudflare.com")
+        csp.append("frame-src https://challenges.cloudflare.com")
+    else:
+        csp.append("script-src 'self'")
+    response.headers["content-security-policy"] = "; ".join(csp)
+    response.headers["x-content-type-options"] = "nosniff"
+    response.headers["referrer-policy"] = "same-origin"
+    response.headers["permissions-policy"] = "geolocation=(), camera=(), microphone=()"
+    return response
+
+
+# ---------------------------------------------------------------- 帳號
+
+
+TURNSTILE_SITEKEY = os.environ.get("DL_TURNSTILE_SITEKEY", "")
+TURNSTILE_SECRET = os.environ.get("DL_TURNSTILE_SECRET", "")
+
+
+class RegisterIn(BaseModel):
+    username: str
+    password: str
+    turnstile_token: str | None = None
+
+
+class LoginIn(BaseModel):
+    username: str
+    password: str
+
+
+class PasswordIn(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class RecoverIn(BaseModel):
+    username: str
+    recovery_code: str
+    new_password: str
+
+
+class DeleteAccountIn(BaseModel):
+    password: str
+
+
+def _limit(limiter: ratelimit.Limiter, key: str) -> None:
+    wait = limiter.check(key)
+    if wait:
+        raise HTTPException(
+            429, "太頻繁了，稍後再試", headers={"retry-after": str(int(wait) + 1)}
+        )
+
+
+def _verify_turnstile(token: str | None, ip: str) -> None:
+    """沒設 secret 就不啟用（本機開發與測試）。啟用與否在啟動時 log 明示，不靜默。"""
+    if not TURNSTILE_SECRET:
+        return
+    import httpx
+
+    try:
+        r = httpx.post(
+            "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+            data={"secret": TURNSTILE_SECRET, "response": token or "", "remoteip": ip},
+            timeout=8,
+        )
+        ok = r.json().get("success") is True
+    except Exception as exc:  # 驗不到就不放行 —— fail closed
+        raise HTTPException(503, "驗證服務暫時無法使用，請稍後再試") from exc
+    if not ok:
+        raise HTTPException(400, "人機驗證未通過")
+
+
+@app.post("/api/auth/register")
+def register(payload: RegisterIn, request: Request):
+    ip = ratelimit.client_ip(request)
+    _limit(ratelimit.REGISTER_IP, ip)
+    _verify_turnstile(payload.turnstile_token, ip)
+    auth.validate_username(payload.username)
+    auth.validate_password(payload.password)
+
+    with db.session(write=True) as conn:
+        user_id, code = auth.create_user(conn, payload.username, payload.password)
+        token = auth.create_session(
+            conn, user_id, ip, request.headers.get("user-agent", "")
+        )
+    out = JSONResponse({"username": payload.username, "recovery_code": code})
+    auth.set_cookie(out, token)
+    return out
+
+
+@app.post("/api/auth/login")
+def login(payload: LoginIn, request: Request):
+    ip = ratelimit.client_ip(request)
+    _limit(ratelimit.LOGIN_IP, ip)
+    _limit(ratelimit.LOGIN_USER, payload.username.lower())
+
+    with db.session(write=True) as conn:
+        user = auth.find_user(conn, payload.username)
+        # 帳號不存在也要跑滿一次雜湊驗證。少了它，「查無此人」會比「密碼錯誤」
+        # 快一個數量級，光靠計時就能把帳號列舉出來。錯誤訊息也必須完全一樣。
+        if not auth.verify_password(user["password_hash"] if user else None, payload.password):
+            raise HTTPException(401, "帳號或密碼不正確")
+
+        if auth.needs_rehash(user["password_hash"]):
+            conn.execute(
+                "UPDATE user SET password_hash=? WHERE id=?",
+                (auth.hash_password(payload.password), user["id"]),
+            )
+        token = auth.create_session(
+            conn, user["id"], ip, request.headers.get("user-agent", "")
+        )
+        conn.execute(
+            "UPDATE user SET last_seen_at=? WHERE id=?",
+            (db.iso(datetime.now(timezone.utc)), user["id"]),
+        )
+    ratelimit.LOGIN_USER.forget(payload.username.lower())
+    out = JSONResponse({"username": user["username"]})
+    auth.set_cookie(out, token)
+    return out
+
+
+@app.post("/api/auth/logout")
+def logout(request: Request):
+    token = request.cookies.get(auth.COOKIE_NAME)
+    if token:
+        with db.session(write=True) as conn:
+            auth.drop_session(conn, token)
+    out = JSONResponse({"ok": True})
+    auth.clear_cookie(out)
+    return out
+
+
+@app.get("/api/me")
+def me(user: sqlite3.Row = CurrentUser):
+    return {"username": user["username"], "created_at": user["created_at"]}
+
+
+@app.post("/api/auth/password")
+def change_password(payload: PasswordIn, request: Request,
+                    user: sqlite3.Row = CurrentUser):
+    auth.validate_password(payload.new_password)
+    token = request.cookies.get(auth.COOKIE_NAME)
+    with db.session(write=True) as conn:
+        row = conn.execute(
+            "SELECT password_hash FROM user WHERE id=?", (user["id"],)
+        ).fetchone()
+        if not auth.verify_password(row["password_hash"], payload.current_password):
+            raise HTTPException(401, "目前的密碼不正確")
+        code = auth.new_recovery_code()
+        conn.execute(
+            "UPDATE user SET password_hash=?, recovery_hash=? WHERE id=?",
+            (auth.hash_password(payload.new_password), auth.hash_recovery_code(code),
+             user["id"]),
+        )
+        # 換密碼多半正是因為「可能已經外洩」。只換密碼卻留著舊 session，
+        # 等於什麼都沒做 —— 對方手上的 cookie 照樣有效。
+        auth.drop_all_sessions(conn, user["id"], keep=token)
+    return {"recovery_code": code}
+
+
+@app.post("/api/auth/recover")
+def recover(payload: RecoverIn, request: Request):
+    ip = ratelimit.client_ip(request)
+    _limit(ratelimit.RECOVER_IP, ip)
+    auth.validate_password(payload.new_password)
+
+    with db.session(write=True) as conn:
+        user = auth.find_user(conn, payload.username)
+        if not auth.verify_recovery_code(
+            user["recovery_hash"] if user else None, payload.recovery_code
+        ):
+            raise HTTPException(401, "帳號或救援碼不正確")
+        code = auth.new_recovery_code()
+        conn.execute(
+            "UPDATE user SET password_hash=?, recovery_hash=? WHERE id=?",
+            (auth.hash_password(payload.new_password), auth.hash_recovery_code(code),
+             user["id"]),
+        )
+        auth.drop_all_sessions(conn, user["id"])  # 舊救援碼用掉了，全部重來
+        token = auth.create_session(
+            conn, user["id"], ip, request.headers.get("user-agent", "")
+        )
+    out = JSONResponse({"username": user["username"], "recovery_code": code})
+    auth.set_cookie(out, token)
+    return out
+
+
+@app.delete("/api/account")
+def delete_account(payload: DeleteAccountIn, user: sqlite3.Row = CurrentUser):
+    with db.session(write=True) as conn:
+        row = conn.execute(
+            "SELECT password_hash FROM user WHERE id=?", (user["id"],)
+        ).fetchone()
+        if not auth.verify_password(row["password_hash"], payload.password):
+            raise HTTPException(401, "密碼不正確")
+        # 一行 DELETE，其餘靠 ON DELETE CASCADE。手動一張表一張表清，
+        # 總有一天會漏掉新加的那張。
+        conn.execute("DELETE FROM user WHERE id=?", (user["id"],))
+    out = JSONResponse({"ok": True})
+    auth.clear_cookie(out)
+    return out
+
+
 # ---------------------------------------------------------------- decks / queues
 
 
 @app.get("/api/decks")
-def decks():
+def decks(user: sqlite3.Row = CurrentUser):
     with db.session() as conn:
-        uid = _current_user(conn)
+        uid = user["id"]
         out = []
         for key in DECKS:
             d = DECK_DATA[key]
@@ -134,13 +387,14 @@ def queue(
     category: str | None = None,
     shuffle: bool = False,
     limit: int = Query(0, ge=0),
+    user: sqlite3.Row = CurrentUser,
 ):
     """三個入口（照 kg 的 Menu 結構）：unlearned / due / all。刻意沒有每日上限。"""
     if kind not in ("unlearned", "due", "all"):
         raise HTTPException(404, f"unknown queue: {kind}")
     d = _deck_or_404(deck)
     with db.session() as conn:
-        uid = _current_user(conn)
+        uid = user["id"]
         now = _now(conn, uid)
         meta = {r["card_id"]: r for r in _rows(conn, uid, deck)}
 
@@ -171,7 +425,7 @@ def queue(
 
 
 @app.get("/api/card/{card_id}")
-def card(card_id: str):
+def card(card_id: str, user: sqlite3.Row = CurrentUser):
     for d in DECK_DATA.values():
         q = d.by_id.get(card_id)
         if q:
@@ -180,7 +434,7 @@ def card(card_id: str):
         raise HTTPException(404, f"unknown card: {card_id}")
 
     with db.session() as conn:
-        uid = _current_user(conn)
+        uid = user["id"]
         s = db.get_state(conn, uid, card_id, _cfg(conn, uid))
         now = _now(conn, uid)
         return {
@@ -220,8 +474,10 @@ class RegradeIn(BaseModel):
 
 
 class SyncIn(BaseModel):
-    answers: list[AnswerIn] = []
-    notes: dict[str, str] = {}
+    # 上限不是效能考量，是「一個請求能讓伺服器做多少事」的閘門。
+    # 前端補送本來就分批（每批 500 筆），正常使用永遠碰不到。
+    answers: list[AnswerIn] = Field(default_factory=list, max_length=5000)
+    notes: dict[str, str] = Field(default_factory=dict, max_length=5000)
 
 
 def _question(card_id: str) -> dict:
@@ -306,16 +562,16 @@ def _apply_answer(conn, user_id: int, payload: AnswerIn,
 
 
 @app.post("/api/answer")
-def answer(payload: AnswerIn):
+def answer(payload: AnswerIn, user: sqlite3.Row = CurrentUser):
     with db.session(write=True) as conn:
-        uid = _current_user(conn)
+        uid = user["id"]
         if payload.client_event_id and db.event_exists(conn, uid, payload.client_event_id):
             raise HTTPException(409, "duplicate client_event_id")
         return _apply_answer(conn, uid, payload)
 
 
 @app.post("/api/answer/regrade")
-def regrade(payload: RegradeIn):
+def regrade(payload: RegradeIn, user: sqlite3.Row = CurrentUser):
     """把「上一次作答」改判為 forgot（前端的「我是猜的」）。
 
     不是再送一次 answer —— 那會被當成第二次作答，從已經放大的間隔再乘 0.5，
@@ -324,7 +580,7 @@ def regrade(payload: RegradeIn):
     """
     q = _question(payload.card_id)
     with db.session(write=True) as conn:
-        uid = _current_user(conn)
+        uid = user["id"]
         ev = db.latest_event(conn, uid, payload.card_id)
         if ev is None:
             raise HTTPException(409, "no answer to regrade")
@@ -393,13 +649,13 @@ def _bootstrap_payload(conn, user_id: int) -> dict:
 
 
 @app.get("/api/bootstrap")
-def bootstrap():
+def bootstrap(user: sqlite3.Row = CurrentUser):
     with db.session() as conn:
-        return _bootstrap_payload(conn, _current_user(conn))
+        return _bootstrap_payload(conn, user["id"])
 
 
 @app.post("/api/sync")
-def sync(payload: SyncIn):
+def sync(payload: SyncIn, user: sqlite3.Row = CurrentUser):
     """補送離線期間累積的作答與筆記，回傳權威狀態讓前端整份覆蓋。
 
     照 reviewed_at 由舊到新重放 —— 順序錯了間隔就會算錯（同一張卡答兩次，
@@ -414,9 +670,10 @@ def sync(payload: SyncIn):
         payload.answers,
         key=lambda a: (a.reviewed_at or srs.utcnow(), a.client_event_id or ""),
     )
+    _limit(ratelimit.SYNC_USER, str(user["id"]))
     dirty: set[tuple[str, str]] = set()
     with db.session(write=True) as conn:
-        uid = _current_user(conn)
+        uid = user["id"]
         for a in ordered:
             if a.client_event_id and db.event_exists(conn, uid, a.client_event_id):
                 skipped.append(a.client_event_id)
@@ -465,16 +722,16 @@ class NoteIn(BaseModel):
 
 
 @app.get("/api/note/{card_id}")
-def get_note(card_id: str):
+def get_note(card_id: str, user: sqlite3.Row = CurrentUser):
     with db.session() as conn:
-        return {"card_id": card_id, "body": _note(conn, _current_user(conn), card_id) or ""}
+        return {"card_id": card_id, "body": _note(conn, user["id"], card_id) or ""}
 
 
 @app.put("/api/note/{card_id}")
-def put_note(card_id: str, payload: NoteIn):
+def put_note(card_id: str, payload: NoteIn, user: sqlite3.Row = CurrentUser):
     body = payload.body.strip()
     with db.session(write=True) as conn:
-        uid = _current_user(conn)
+        uid = user["id"]
         if body:
             conn.execute(
                 """INSERT INTO note(user_id, card_id, body, updated) VALUES(?,?,?,?)
@@ -497,10 +754,11 @@ def browse(
     category: str | None = None,
     wrong_only: bool = False,
     noted_only: bool = False,
+    user: sqlite3.Row = CurrentUser,
 ):
     d = _deck_or_404(deck)
     with db.session() as conn:
-        uid = _current_user(conn)
+        uid = user["id"]
         states = _states(conn, uid, deck)
         lapsed = {
             r["card_id"]
@@ -545,10 +803,10 @@ def browse(
 
 
 @app.get("/api/stats")
-def stats(deck: str = Query(...)):
+def stats(deck: str = Query(...), user: sqlite3.Row = CurrentUser):
     d = _deck_or_404(deck)
     with db.session() as conn:
-        uid = _current_user(conn)
+        uid = user["id"]
         now = _now(conn, uid)
 
         # 14 日到期預測（今天以前全部收攏進今天，照 kg 的 forecast 做法）
@@ -626,9 +884,9 @@ class SettingsIn(BaseModel):
 
 
 @app.get("/api/settings")
-def get_settings():
+def get_settings(user: sqlite3.Row = CurrentUser):
     with db.session() as conn:
-        return _settings_payload(conn, _current_user(conn))
+        return _settings_payload(conn, user["id"])
 
 
 def _settings_payload(conn, user_id: int) -> dict:
@@ -649,9 +907,9 @@ def _settings_payload(conn, user_id: int) -> dict:
 
 
 @app.put("/api/settings")
-def put_settings(payload: SettingsIn):
+def put_settings(payload: SettingsIn, user: sqlite3.Row = CurrentUser):
     with db.session(write=True) as conn:
-        uid = _current_user(conn)
+        uid = user["id"]
         if payload.preset is not None:
             if payload.preset not in srs.PRESETS:
                 raise HTTPException(400, f"unknown preset: {payload.preset}")
