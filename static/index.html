@@ -3,26 +3,53 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#2f6df6">
+<meta name="theme-color" content="#f3f2f2" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#1a1918" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
 <title>駕照筆試</title>
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="駕照筆試">
+<link rel="preload" href="/static/fonts/archivo-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 
+<!-- Lucide 圖示（系統指定的圖示集）。用 sprite 而不是逐處內嵌：
+     同一個 path 在 app.js 產生的 HTML 裡會重複出現幾十次。 -->
+<svg id="icon-sprite" aria-hidden="true">
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></symbol>
+  <symbol id="i-home" viewBox="0 0 24 24"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><path d="M3 5h.01"/><path d="M3 12h.01"/><path d="M3 19h.01"/><path d="M8 5h13"/><path d="M8 12h13"/><path d="M8 19h13"/></symbol>
+  <symbol id="i-chart" viewBox="0 0 24 24"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M21 4h-7"/><path d="M10 4H3"/><path d="M21 12h-9"/><path d="M8 12H3"/><path d="M21 20h-5"/><path d="M12 20H3"/><path d="M14 2v4"/><path d="M8 10v4"/><path d="M16 18v4"/></symbol>
+  <symbol id="i-shuffle" viewBox="0 0 24 24"><path d="m18 14 4 4-4 4"/><path d="m18 2 4 4-4 4"/><path d="M2 18h1.97a4 4 0 0 0 3.3-1.75l5.46-8.5A4 4 0 0 1 16.03 6H22"/><path d="M2 6h1.97a4 4 0 0 1 3.3 1.75l.4.6"/><path d="M22 18h-5.97a4 4 0 0 1-3.3-1.75l-.4-.6"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></symbol>
+  <symbol id="i-right" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="m6 3 14 9-14 9Z"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z"/><path d="M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12"/><path d="M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><path d="M14 4v16"/><path d="M10 4v16"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+  <symbol id="i-dice" viewBox="0 0 24 24"><path d="M12 15V3"/><path d="m7 10 5 5 5-5"/></symbol>
+</svg>
+
 <header id="topbar">
-  <button class="icon" id="btn-back" hidden aria-label="返回">←</button>
-  <h1 id="title">駕照筆試</h1>
-  <span id="netdot" hidden></span>
-  <nav>
-    <button class="icon" data-nav="home" aria-label="首頁">⌂</button>
-    <button class="icon" data-nav="browse" aria-label="題庫">☰</button>
-    <button class="icon" data-nav="stats" aria-label="統計">◫</button>
-    <button class="icon" data-nav="settings" aria-label="設定">⚙</button>
+  <button class="btn btn-icon" id="btn-back" hidden aria-label="返回">
+    <svg class="ico"><use href="#i-back"></use></svg>
+  </button>
+  <h1 class="nav-brand" id="title">駕照筆試</h1>
+  <span id="netdot" class="tag" hidden></span>
+  <nav class="nav-links">
+    <button class="btn btn-icon" data-nav="home" aria-label="首頁"><svg class="ico"><use href="#i-home"></use></svg></button>
+    <button class="btn btn-icon" data-nav="browse" aria-label="題庫"><svg class="ico"><use href="#i-list"></use></svg></button>
+    <button class="btn btn-icon" data-nav="stats" aria-label="統計"><svg class="ico"><use href="#i-chart"></use></svg></button>
+    <button class="btn btn-icon" data-nav="settings" aria-label="設定"><svg class="ico"><use href="#i-sliders"></use></svg></button>
   </nav>
 </header>
 
@@ -35,58 +62,79 @@
     <div id="progress"><div id="progress-bar"></div></div>
     <div id="session-bar">
       <p id="progress-text"></p>
-      <button id="btn-shuffle" class="ghost small" title="打亂還沒作答的題目">🔀 洗牌</button>
+      <button id="btn-shuffle" class="btn btn-secondary btn-sm" title="打亂還沒作答的題目">
+        <svg class="ico ico-sm"><use href="#i-shuffle"></use></svg><span>洗牌</span>
+      </button>
     </div>
 
     <article id="card">
-      <p id="q-meta"></p>
+      <p id="q-meta" class="kicker"></p>
       <p id="q-warn" hidden></p>
       <div id="q-stem"></div>
       <div id="q-images"></div>
       <div id="options"></div>
 
       <div id="verdict" hidden>
-        <p id="verdict-text"></p>
+        <div id="verdict-head">
+          <svg class="ico" id="verdict-icon"><use href="#i-check"></use></svg>
+          <p id="verdict-text"></p>
+        </div>
         <p id="verdict-sched"></p>
-        <button id="btn-guessed" class="ghost">我是猜的（重排到更近）</button>
+        <button id="btn-guessed" class="btn btn-secondary btn-sm">我是猜的（重排到更近）</button>
       </div>
 
       <details id="note-box">
-        <summary>我的筆記</summary>
-        <textarea id="note" rows="4" placeholder="為什麼選這個？寫下自己的判斷依據。"></textarea>
+        <summary><svg class="ico ico-sm"><use href="#i-chevron"></use></svg>我的筆記</summary>
+        <textarea id="note" class="input" rows="4" placeholder="為什麼選這個？寫下自己的判斷依據。"></textarea>
         <p id="note-status"></p>
       </details>
     </article>
 
-    <button id="btn-next" class="primary big" hidden>下一題</button>
+    <button id="btn-next" class="btn btn-primary btn-block btn-lg" hidden>
+      下一題<svg class="ico btn-trail"><use href="#i-right"></use></svg>
+    </button>
   </section>
 
   <!-- ── 完成 ───────────────────────────────────────────── -->
   <section id="view-done" class="view" hidden>
     <div class="done">
-      <div class="tick">✓</div>
-      <h2>這一輪做完了</h2>
-      <p class="muted">佇列裡的卡片都處理完畢。</p>
-      <button class="primary" data-nav="home">回首頁</button>
+      <svg class="ico tick"><use href="#i-check"></use></svg>
+      <h2>這一輪<br>做完了</h2>
+      <p>佇列裡的卡片都處理完畢。</p>
+      <button class="btn" data-nav="home">回首頁<svg class="ico btn-trail"><use href="#i-right"></use></svg></button>
     </div>
   </section>
 
   <!-- ── 題庫瀏覽 ───────────────────────────────────────── -->
   <section id="view-browse" class="view" hidden>
     <div class="toolbar">
-      <select id="br-deck"></select>
-      <input id="br-q" type="search" placeholder="搜尋題目文字…">
-      <label class="chk"><input type="checkbox" id="br-wrong"> 只看不熟的</label>
-      <label class="chk"><input type="checkbox" id="br-noted"> 只看有筆記</label>
+      <label class="span-all">
+        <span class="field-label">搜尋</span>
+        <input id="br-q" class="input" type="search" placeholder="搜尋題目文字…">
+      </label>
+      <label>
+        <span class="field-label">題庫</span>
+        <select id="br-deck" class="input"></select>
+      </label>
+      <label>
+        <span class="field-label">分類</span>
+        <select id="br-cat" class="input"></select>
+      </label>
+      <div class="chk-row">
+        <label class="chk"><input type="checkbox" id="br-wrong"><span class="box"><svg class="ico"><use href="#i-check"></use></svg></span>只看不熟的</label>
+        <label class="chk"><input type="checkbox" id="br-noted"><span class="box"><svg class="ico"><use href="#i-check"></use></svg></span>只看有筆記</label>
+      </div>
     </div>
-    <select id="br-cat"></select>
-    <p id="br-count" class="muted"></p>
-    <div id="br-list"></div>
+    <div class="sec">題目<span class="sec-note" id="br-count"></span></div>
+    <div id="br-list" class="rows"></div>
   </section>
 
   <!-- ── 統計 ───────────────────────────────────────────── -->
   <section id="view-stats" class="view" hidden>
-    <select id="st-deck"></select>
+    <label>
+      <span class="field-label">題庫</span>
+      <select id="st-deck" class="input"></select>
+    </label>
     <div id="st-body"></div>
   </section>
 
@@ -96,7 +144,10 @@
   </section>
 </main>
 
-<div id="boot" class="boot"><p>載入題庫…</p></div>
+<div id="boot" class="boot">
+  <p class="kicker kicker-accent">駕照筆試</p>
+  <h2>載入題庫…</h2>
+</div>
 
 <script type="module" src="/static/app.js"></script>
 </body>

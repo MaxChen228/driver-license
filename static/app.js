@@ -57,8 +57,14 @@ async function boot() {
 
 function bootFail() {
   $("#boot").innerHTML =
-    `<p>離線，而且這台裝置還沒有下載過題庫。</p>
+    `<p class="kicker kicker-accent">無法啟動</p>
+     <h2>離線，而且這台裝置<br>還沒有下載過題庫</h2>
      <p class="muted">請先在有連線時開啟一次，之後就能完全離線使用。</p>`;
+}
+
+// 圖示：全部走 index.html 裡的 sprite，不重複內嵌 path
+function ico(name, cls = "ico") {
+  return `<svg class="${cls}"><use href="#i-${name}"></use></svg>`;
 }
 
 async function loadBanks(decks) {
@@ -171,11 +177,11 @@ async function paintNet() {
   const dot = $("#netdot");
   if (!navigator.onLine) {
     dot.hidden = false;
-    dot.className = "off";
+    dot.className = "tag off";
     dot.textContent = pending ? `離線 · ${pending} 待送` : "離線";
   } else if (pending) {
     dot.hidden = false;
-    dot.className = "pending";
+    dot.className = "tag pending";
     dot.textContent = `${pending} 待送`;
   } else {
     dot.hidden = true;
@@ -235,7 +241,9 @@ function shuffled(a) {
 function renderHome() {
   $("#view-home").innerHTML =
     SNAP.decks.map((d) => deckCard(d, counts(d.deck))).join("") +
-    (SNAP.paused ? `<p class="muted">⏸ 時鐘已凍結 — 到期時間不會推進。</p>` : "");
+    (SNAP.paused
+      ? `<p class="home-note tag tag-accent">${ico("pause", "ico ico-sm")}時鐘已凍結 —— 到期時間不會推進</p>`
+      : "");
 
   $("#view-home").querySelectorAll("[data-start]").forEach((b) =>
     b.addEventListener("click", () =>
@@ -250,31 +258,38 @@ function deckCard(d, c) {
     .map((x) => `<option value="${esc(x.category)}">${esc(x.category)}（${x.count}）</option>`)
     .join("");
   return `
-  <div class="deck">
+  <article class="deck">
     <h2>${esc(d.label)}</h2>
-    <p class="sub">${esc(d.title)} · ${esc(d.version)} · 共 ${d.total} 題</p>
-    <div class="counts">
-      <div class="count"><b>${c.unlearned}</b><span>未學習</span></div>
-      <div class="count"><b>${c.due}</b><span>待複習</span></div>
-      <div class="count"><b>${c.reviewed}</b><span>已複習</span></div>
+    <p class="sub kicker">${esc(d.title)} · ${esc(d.version)} · 共 ${d.total} 題</p>
+    <div class="metrics">
+      <div class="metric"><b>${c.unlearned}</b><span>未學習</span></div>
+      <div class="metric${c.due ? " is-accent" : ""}"><b>${c.due}</b><span>待複習</span></div>
+      <div class="metric"><b>${c.reviewed}</b><span>已複習</span></div>
     </div>
-    <div class="actions">
-      <button class="primary" data-start="due" data-deck="${d.deck}" ${c.due ? "" : "disabled"}>
-        複習到期（${c.due}）</button>
-      <button class="alt" data-start="unlearned" data-deck="${d.deck}" ${c.unlearned ? "" : "disabled"}>
-        學新題（${c.unlearned}）</button>
-      <button class="alt" data-start="all" data-deck="${d.deck}">全部（${c.due + c.unlearned}）</button>
+    <div class="deck-actions">
+      <button class="btn btn-primary btn-lg" data-start="due" data-deck="${d.deck}" ${c.due ? "" : "disabled"}>
+        ${ico("play", "ico ico-sm")}<span>複習到期</span><span class="btn-count">${c.due}</span></button>
+      <button class="btn btn-secondary" data-start="unlearned" data-deck="${d.deck}" ${c.unlearned ? "" : "disabled"}>
+        ${ico("plus", "ico ico-sm")}<span>學新題</span><span class="btn-count">${c.unlearned}</span></button>
+      <button class="btn btn-secondary" data-start="all" data-deck="${d.deck}">
+        ${ico("layers", "ico ico-sm")}<span>全部</span><span class="btn-count">${c.due + c.unlearned}</span></button>
     </div>
     <div class="catrow">
-      <select id="cat-${d.deck}"><option value="">全部分類</option>${cats}</select>
+      <label class="field-label" for="cat-${d.deck}">分類範圍</label>
+      <select id="cat-${d.deck}" class="input"><option value="">全部分類</option>${cats}</select>
     </div>
-  </div>`;
+  </article>`;
 }
 
 function show(view) {
   VIEWS.forEach((v) => ($(`#view-${v}`).hidden = v !== view));
   $("#title").textContent = TITLES[view];
   $("#btn-back").hidden = view !== "session";
+  // 作答與完成沒有對應的 nav 鍵，那時就全部不標 —— 標錯的當前位置比不標更糟
+  document.querySelectorAll(".nav-links [data-nav]").forEach((b) => {
+    if (b.dataset.nav === view) b.setAttribute("aria-current", "page");
+    else b.removeAttribute("aria-current");
+  });
   window.scrollTo(0, 0);
 }
 
@@ -308,8 +323,10 @@ function loadCard() {
       // 選項本身是圖的 6 題（汽車 183/185/233/523/723/1004）走這個分支
       const body = o.is_image && q.images[idx]
         ? `<img src="/${q.images[idx].file}" alt="選項 ${o.n}">`
-        : `<span>${esc(o.text)}</span>`;
-      return `<button class="opt" data-n="${o.n}"><span class="n">${o.n}</span>${body}</button>`;
+        : esc(o.text);
+      return `<button class="opt" data-n="${o.n}">
+        <span class="n">${o.n}</span><span class="body">${body}</span><span class="mark"></span>
+      </button>`;
     })
     .join("");
   $("#options").querySelectorAll(".opt").forEach((b) =>
@@ -317,7 +334,8 @@ function loadCard() {
   );
 
   const st = SNAP.states.get(id);
-  $("#q-warn").textContent = st && st.lapse_count ? `⚠ 這題你答錯過 ${st.lapse_count} 次` : "";
+  $("#q-warn").innerHTML = st && st.lapse_count
+    ? `${ico("alert", "ico ico-sm")}<span>這題你答錯過 ${st.lapse_count} 次</span>` : "";
   $("#q-warn").hidden = !(st && st.lapse_count);
 
   $("#verdict").hidden = true;
@@ -368,12 +386,15 @@ function paintVerdict(r, chosen) {
   $("#options").querySelectorAll(".opt").forEach((b) => {
     const n = Number(b.dataset.n);
     b.disabled = true;
-    if (n === r.answer) b.classList.add("correct");
-    else if (n === chosen) b.classList.add("wrong");
+    // 顏色不是唯一線索：正解與誤選各自帶一個圖示，色盲與強光下都讀得出來
+    if (n === r.answer) { b.classList.add("correct"); b.querySelector(".mark").innerHTML = ico("check"); }
+    else if (n === chosen) { b.classList.add("wrong"); b.querySelector(".mark").innerHTML = ico("x"); }
   });
   const v = $("#verdict-text");
   v.textContent = r.correct ? "答對" : "答錯";
-  v.className = r.correct ? "ok" : "bad";
+  v.className = r.correct ? "" : "bad";
+  $("#verdict-icon").innerHTML = `<use href="#i-${r.correct ? "check" : "x"}"></use>`;
+  $("#verdict-icon").style.color = r.correct ? "" : "var(--color-accent)";
   $("#verdict-sched").textContent =
     `下次複習：${fmtDue(r.next_review_at)}（間隔 ${fmtHours(r.interval_hours)}）` +
     (r.correct ? "" : `　·　累計答錯 ${r.lapse_count} 次`);
@@ -429,11 +450,18 @@ $("#btn-shuffle").addEventListener("click", () => {
   flash($("#btn-shuffle"), `已洗牌（剩 ${tail.length} 題）`);
 });
 
+// 存 innerHTML 而不是 textContent —— 按鈕裡有 <svg> 圖示，用 textContent 還原會把它吃掉
 function flash(btn, msg) {
-  const old = btn.textContent;
+  if (btn.dataset.flashing) return;
+  const old = btn.innerHTML;
+  btn.dataset.flashing = "1";
   btn.textContent = msg;
   btn.disabled = true;
-  setTimeout(() => { btn.textContent = old; btn.disabled = false; }, 1100);
+  setTimeout(() => {
+    btn.innerHTML = old;
+    btn.disabled = false;
+    delete btn.dataset.flashing;
+  }, 1100);
 }
 
 $("#btn-next").addEventListener("click", next);
@@ -472,6 +500,8 @@ document.addEventListener("keydown", (e) => {
 });
 
 // ── 題庫瀏覽（全本地，離線一樣好用）──────────────────
+const STATE_LABEL = { unlearned: "未學習", due: "待複習", reviewed: "已複習" };
+
 function renderBrowse() {
   fillDeckSelect("#br-deck");
   const d = BANK[$("#br-deck").value];
@@ -497,14 +527,18 @@ function refreshBrowse() {
     return true;
   });
 
-  $("#br-count").textContent = `${items.length} 題`;
+  $("#br-count").textContent =
+    `${items.length} 題` + (items.length > 400 ? "（顯示前 400 題）" : "");
   $("#br-list").innerHTML = items.slice(0, 400).map((q) => {
     const st = SNAP.states.get(q.id);
-    const cls = st && st.lapse_count ? "lapsed" : stateOf(q.id);
+    // 答錯次數不再跟「到期」搶同一個紅點（兩個都紅等於沒有區別），改成獨立標籤
+    const lapses = st && st.lapse_count
+      ? `<span class="tag tag-accent trail">錯 ${st.lapse_count}</span>` : "";
     return `<button class="row" data-id="${q.id}">
-      <span class="dot ${cls}"></span>
+      <span class="dot ${stateOf(q.id)}" title="${STATE_LABEL[stateOf(q.id)]}"></span>
       <span class="num">${q.number}</span>
       <span class="txt">${esc(q.stem_is_image ? "（圖片題）" : q.stem)}</span>
+      ${lapses}
     </button>`;
   }).join("");
   $("#br-list").querySelectorAll(".row").forEach((b) =>
@@ -534,21 +568,26 @@ async function renderStats() {
   const max = Math.max(1, ...forecast.map((f) => f.count));
 
   $("#st-body").innerHTML = `
-    ${s ? "" : `<p class="muted">離線 —— 正確率與連續天數需要伺服器上的作答紀錄，這裡先顯示本機算得出來的部分。</p>`}
+    <div class="sec">概況${s ? "" : `<span class="sec-note">離線 · 僅本機資料</span>`}</div>
     <div class="tiles">
       <div class="tile"><b>${s ? s.answered_total : local.answered}</b><span>累計作答</span></div>
       <div class="tile"><b>${s && s.accuracy !== null ? Math.round(s.accuracy * 100) + "%" : "—"}</b><span>正確率</span></div>
       <div class="tile"><b>${s ? s.streak_days : "—"}</b><span>連續天數</span></div>
     </div>
-    <p class="sec">未來 14 天到期量</p>
-    <div class="bars">${forecast.map((f) =>
-      `<div style="height:${(f.count / max) * 100}%" title="${f.day}：${f.count}"></div>`).join("")}</div>
+    ${s ? "" : `<p class="muted">正確率與連續天數需要伺服器上的作答紀錄。</p>`}
+    <div class="sec">未來 14 天到期量<span class="sec-note">尖峰 ${max} 題</span></div>
+    <div class="chart">
+      <div class="bars">${forecast.map((f) =>
+        `<div class="${f.count ? "" : "empty"}" style="height:${Math.max((f.count / max) * 100, 1.5)}%" title="${f.day}：${f.count} 題"></div>`).join("")}</div>
+    </div>
     <div class="barlabels">${forecast.map((f, i) =>
       `<span>${i % 2 ? "" : f.day.slice(8)}</span>`).join("")}</div>
-    <p class="sec">最常答錯的分類</p>
+    <div class="sec">最常答錯的分類<span class="sec-note">點一列直接複習</span></div>
     ${worst.length
-      ? worst.map((c) => `<button class="row" data-cat="${esc(c.category)}">
-          <span class="txt">${esc(c.category)}</span><span class="num">${c.lapses} 次</span></button>`).join("")
+      ? `<div class="rows">${worst.map((c) => `<button class="row" data-cat="${esc(c.category)}">
+          <span class="txt">${esc(c.category)}</span>
+          <span class="tag tag-accent trail">錯 ${c.lapses}</span>
+          ${ico("chevron", "ico ico-sm")}</button>`).join("")}</div>`
       : `<p class="muted">還沒有答錯紀錄。</p>`}`;
 
   // 統計不該只能看 —— 點分類直接開一輪那個分類的複習
@@ -593,28 +632,36 @@ async function renderSettings() {
   const p = SNAP.params;
   const off = !navigator.onLine;
   $("#set-body").innerHTML = `
-    <div class="field">
+    <div class="set-block">
       <h3>複習節奏</h3>
-      <p class="muted">目前：首次 ${fmtHours(p.initial_hours)}　答對 ×${p.remembered_mult}　答錯 ×${p.forgot_mult}　範圍 ${fmtHours(p.min_hours)}–${fmtHours(p.max_hours)}</p>
-      <select id="set-preset" ${off ? "disabled" : ""}>${SNAP.presets.map((n) =>
+      <dl class="kv">
+        <div><dt>首次</dt><dd>${fmtHours(p.initial_hours)}</dd></div>
+        <div><dt>答對</dt><dd>×${p.remembered_mult}</dd></div>
+        <div><dt>答錯</dt><dd>×${p.forgot_mult}</dd></div>
+        <div><dt>範圍</dt><dd>${fmtHours(p.min_hours)}–${fmtHours(p.max_hours)}</dd></div>
+      </dl>
+      <select id="set-preset" class="input" ${off ? "disabled" : ""}>${SNAP.presets.map((n) =>
         `<option value="${n}" ${n === SNAP.preset ? "selected" : ""}>${n === "relaxed" ? "relaxed（寬鬆，預設）" : "intensive（密集）"}</option>`).join("")}</select>
-      ${off ? `<p class="muted">離線時無法變更 —— 這是全域設定，必須由伺服器裁決。</p>` : ""}
+      ${off ? `<p class="muted" style="margin-top:var(--space-2)">離線時無法變更 —— 這是全域設定，必須由伺服器裁決。</p>` : ""}
     </div>
-    <div class="field">
+    <div class="set-block">
       <h3>凍結時鐘</h3>
-      <p class="muted">暫停期間到期時間不再推進，回來時不會有一座待複習山。</p>
-      <label class="switch"><span>暫停累積${SNAP.paused && SNAP.paused_at ? `（自 ${SNAP.paused_at.slice(0, 10)}）` : ""}</span>
-        <input type="checkbox" id="set-pause" ${SNAP.paused ? "checked" : ""} ${off ? "disabled" : ""}></label>
+      <p>暫停期間到期時間不再推進，回來時不會有一座待複習山。</p>
+      <div class="switch">
+        <span>暫停累積${SNAP.paused && SNAP.paused_at ? `（自 ${SNAP.paused_at.slice(0, 10)}）` : ""}</span>
+        <label class="toggle"><input type="checkbox" id="set-pause" ${SNAP.paused ? "checked" : ""} ${off ? "disabled" : ""}><span class="track"></span></label>
+      </div>
     </div>
-    <div class="field">
+    <div class="set-block">
       <h3>離線可用</h3>
-      <p class="muted" id="set-cache">清點中…</p>
-      <button class="ghost" id="set-precache" ${off ? "disabled" : ""}>重新下載離線題庫</button>
-      <p class="muted" id="set-pending"></p>
+      <p id="set-cache">清點中…</p>
+      <p id="set-pending" class="muted"></p>
+      <button class="btn btn-secondary" id="set-precache" ${off ? "disabled" : ""}>
+        ${ico("download", "ico ico-sm")}<span>重新下載離線題庫</span></button>
     </div>
-    <div class="field">
+    <div class="set-block">
       <h3>答錯不會歸零</h3>
-      <p class="muted">答錯是把間隔乘上 ${p.forgot_mult}、不是打回新卡。排到 30 天的題答錯後回到 15 天，累積的記憶強度會保留。</p>
+      <p>答錯是把間隔乘上 ${p.forgot_mult}、不是打回新卡。排到 30 天的題答錯後回到 15 天，累積的記憶強度會保留。</p>
     </div>`;
 
   $("#set-pending").textContent = `待補送的作答：${await store.outboxCount()} 筆`;

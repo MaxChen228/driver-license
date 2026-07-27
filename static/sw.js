@@ -12,7 +12,7 @@
 //
 // 改了 static/ 底下任何檔案就把 VERSION 加一，否則舊 SW 會繼續餵舊的 shell。
 
-const VERSION = "v1";
+const VERSION = "v2";
 const SHELL_CACHE = `shell-${VERSION}`;
 const ASSET_CACHE = `assets-${VERSION}`;   // 題庫與圖片：內容不變，跨版本沿用
 
@@ -22,6 +22,9 @@ const SHELL = [
   "/static/srs.js",
   "/static/store.js",
   "/static/style.css",
+  // 字型自帶而不是連 Google Fonts：離線時外部 CDN 會整個掉回系統字型
+  "/static/fonts/archivo-latin.woff2",
+  "/static/fonts/archivo-latin-ext.woff2",
   "/manifest.webmanifest",
   "/static/icon-192.png",
   "/static/icon-512.png",
