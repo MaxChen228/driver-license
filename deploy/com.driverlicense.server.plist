@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- driver-license 刷題 app（僅 felix 載入；oscar 有 repo 但不註冊）。
+     裝法：cp 到 ~/Library/LaunchAgents/ → launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.driverlicense.server.plist
+     停用：launchctl bootout gui/$(id -u)/com.driverlicense.server
+     改 app/*.py：launchctl kickstart -k gui/$(id -u)/com.driverlicense.server
+     改本 plist：必須 bootout 再 bootstrap（kickstart 不重讀 plist）。 -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.driverlicense.server</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/chenliangyu/project/driver-license/.venv/bin/python</string>
+    <string>-m</string>
+    <string>uvicorn</string>
+    <string>app.main:app</string>
+    <!-- 綁 Tailscale 介面 IP：只有 tailnet 看得到，不對 LAN、不對外 -->
+    <string>--host</string>
+    <string>100.118.39.104</string>
+    <string>--port</string>
+    <string>8006</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/chenliangyu/project/driver-license</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <!-- 進度 DB 放 repo 外：git pull / reset 不會清掉使用者進度 -->
+    <key>DL_DATA_DIR</key>
+    <string>/Users/chenliangyu/driver-license-data</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/Users/chenliangyu/Library/Logs/driver-license.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/chenliangyu/Library/Logs/driver-license.err.log</string>
+</dict>
+</plist>

@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#111318">
+<title>駕照筆試</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header id="topbar">
+  <button class="icon" id="btn-back" hidden aria-label="返回">←</button>
+  <h1 id="title">駕照筆試</h1>
+  <nav>
+    <button class="icon" data-nav="home" aria-label="首頁">⌂</button>
+    <button class="icon" data-nav="browse" aria-label="題庫">☰</button>
+    <button class="icon" data-nav="stats" aria-label="統計">◫</button>
+    <button class="icon" data-nav="settings" aria-label="設定">⚙</button>
+  </nav>
+</header>
+
+<main>
+  <!-- ── 首頁 ───────────────────────────────────────────── -->
+  <section id="view-home" class="view"></section>
+
+  <!-- ── 作答 ───────────────────────────────────────────── -->
+  <section id="view-session" class="view" hidden>
+    <div id="progress"><div id="progress-bar"></div></div>
+    <p id="progress-text"></p>
+
+    <article id="card">
+      <p id="q-meta"></p>
+      <div id="q-stem"></div>
+      <div id="q-images"></div>
+      <div id="options"></div>
+
+      <div id="verdict" hidden>
+        <p id="verdict-text"></p>
+        <p id="verdict-sched"></p>
+        <button id="btn-guessed" class="ghost">我是猜的（重排到更近）</button>
+      </div>
+
+      <details id="note-box">
+        <summary>我的筆記</summary>
+        <textarea id="note" rows="4" placeholder="為什麼選這個？寫下自己的判斷依據。"></textarea>
+        <p id="note-status"></p>
+      </details>
+    </article>
+
+    <button id="btn-next" class="primary big" hidden>下一題</button>
+  </section>
+
+  <!-- ── 完成 ───────────────────────────────────────────── -->
+  <section id="view-done" class="view" hidden>
+    <div class="done">
+      <div class="tick">✓</div>
+      <h2>這一輪做完了</h2>
+      <p class="muted">佇列裡的卡片都處理完畢。</p>
+      <button class="primary" data-nav="home">回首頁</button>
+    </div>
+  </section>
+
+  <!-- ── 題庫瀏覽 ───────────────────────────────────────── -->
+  <section id="view-browse" class="view" hidden>
+    <div class="toolbar">
+      <select id="br-deck"></select>
+      <input id="br-q" type="search" placeholder="搜尋題目文字…">
+      <label class="chk"><input type="checkbox" id="br-wrong"> 只看不熟的</label>
+      <label class="chk"><input type="checkbox" id="br-noted"> 只看有筆記</label>
+    </div>
+    <select id="br-cat"></select>
+    <p id="br-count" class="muted"></p>
+    <div id="br-list"></div>
+  </section>
+
+  <!-- ── 統計 ───────────────────────────────────────────── -->
+  <section id="view-stats" class="view" hidden>
+    <select id="st-deck"></select>
+    <div id="st-body"></div>
+  </section>
+
+  <!-- ── 設定 ───────────────────────────────────────────── -->
+  <section id="view-settings" class="view" hidden>
+    <div id="set-body"></div>
+  </section>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

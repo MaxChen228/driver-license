@@ -1,0 +1,11 @@
+.DS_Store
+*.log
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 使用者進度 DB 在 repo 外（~/driver-license-data/），這裡只防呆
+*.db
+*.db-wal
+*.db-shm
