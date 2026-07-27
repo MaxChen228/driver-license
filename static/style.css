@@ -93,7 +93,11 @@ textarea { resize: vertical; }
 /* ── session ─────────────────────────────────────────── */
 #progress { height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; }
 #progress-bar { height: 100%; width: 0; background: var(--accent); transition: width .18s; }
-#progress-text { margin: 8px 0 14px; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+#session-bar { display: flex; align-items: center; gap: 12px; margin: 8px 0 14px; }
+#progress-text { flex: 1; min-width: 0; margin: 0; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ghost.small { flex: 0 0 auto; padding: 6px 11px; font-size: 13px; border-radius: 8px; }
+.ghost.small:hover { border-color: var(--accent); color: var(--text); }
+.ghost.small:disabled { opacity: .35; cursor: not-allowed; }
 
 #card {
   background: var(--surface); border: 1px solid var(--line);
@@ -102,10 +106,12 @@ textarea { resize: vertical; }
 #q-meta { margin: 0 0 10px; font-size: 12px; color: var(--muted); }
 #q-stem { font-size: 18px; font-weight: 600; line-height: 1.7; }
 #q-stem:empty { display: none; }
-#q-images { display: flex; flex-wrap: wrap; gap: 12px; margin: 14px 0; }
+/* 圖片題的圖就是題目本身 —— 置中，否則卡片重心整個偏左 */
+#q-images { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; margin: 16px 0 4px; }
+#q-images:empty { display: none; }
 #q-images img {
-  max-width: 100%; height: auto; border-radius: 10px;
-  background: #fff; padding: 6px;
+  max-width: min(100%, 260px); height: auto; border-radius: 10px;
+  background: #fff; padding: 8px;
 }
 
 #options { display: grid; gap: 10px; margin-top: 16px; }
@@ -155,15 +161,18 @@ textarea { resize: vertical; }
 .toolbar #br-q { grid-column: 1 / -1; }
 .chk { display: flex; align-items: center; gap: 7px; font-size: 14px; color: var(--muted); }
 .chk input { width: 18px; height: 18px; }
-#br-list { display: grid; gap: 8px; margin-top: 12px; }
+#br-list { display: grid; gap: 8px; margin-top: 12px; min-width: 0; }
 .row {
-  display: flex; align-items: center; gap: 10px;
+  display: flex; align-items: center; gap: 12px;
   padding: 12px 14px; background: var(--surface);
   border: 1px solid var(--line); border-radius: 10px;
-  cursor: pointer; text-align: left; width: 100%; color: var(--text);
+  cursor: pointer; text-align: left; width: 100%; min-width: 0; color: var(--text);
 }
-.row .num { flex: 0 0 52px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
-.row .txt { flex: 1; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row:hover { border-color: var(--accent); }
+.row .num { flex: 0 0 40px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
+/* min-width:0 是必要的：flex item 預設 min-width:auto，配上 nowrap 會撐破容器、
+   讓整個版面溢出 max-width 並產生橫向捲動，ellipsis 也永遠不會生效。 */
+.row .txt { flex: 1; min-width: 0; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dot { flex: 0 0 8px; height: 8px; border-radius: 50%; background: var(--line); }
 .dot.due { background: var(--accent); }
 .dot.reviewed { background: var(--ok); }

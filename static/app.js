@@ -87,6 +87,7 @@ async function loadCard() {
 
   $("#progress-bar").style.width = `${(S.i / S.ids.length) * 100}%`;
   $("#progress-text").textContent = `${S.i + 1} / ${S.ids.length}　·　${q.category}`;
+  $("#btn-shuffle").disabled = S.ids.length - S.i < 2;   // 只剩最後一題就沒得洗
   $("#q-meta").textContent = `${q.id}　${q.architecture}`;
   $("#q-stem").textContent = q.stem;
 
@@ -160,6 +161,27 @@ $("#btn-guessed").addEventListener("click", async () => {
   $("#btn-guessed").hidden = true;
 });
 
+// 洗牌（照 kg：只打亂「還沒作答」的尾段，已經做過的不動，才不會重複刷同一批）
+$("#btn-shuffle").addEventListener("click", () => {
+  if (!S) return;
+  const from = S.answered ? S.i + 1 : S.i;   // 已作答就保留當前題的判定，從下一題開始洗
+  const tail = S.ids.slice(from);
+  for (let i = tail.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [tail[i], tail[j]] = [tail[j], tail[i]];
+  }
+  S.ids = S.ids.slice(0, from).concat(tail);
+  if (!S.answered) loadCard();
+  flash($("#btn-shuffle"), `已洗牌（剩 ${tail.length} 題）`);
+});
+
+function flash(btn, msg) {
+  const old = btn.textContent;
+  btn.textContent = msg;
+  btn.disabled = true;
+  setTimeout(() => { btn.textContent = old; btn.disabled = false; }, 1100);
+}
+
 $("#btn-next").addEventListener("click", next);
 function next() {
   S.i += 1;
@@ -185,6 +207,7 @@ document.addEventListener("keydown", (e) => {
   else if (e.key === " " || e.key === "Enter") {
     if (S && S.answered) { next(); e.preventDefault(); }
   } else if (e.key.toLowerCase() === "g") { $("#btn-guessed").click(); }
+  else if (e.key.toLowerCase() === "s") { $("#btn-shuffle").click(); }
   else if (e.key.toLowerCase() === "n") { $("#note-box").open = true; $("#note").focus(); }
 });
 
