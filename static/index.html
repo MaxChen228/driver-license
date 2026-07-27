@@ -3,8 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#111318">
+<meta name="theme-color" content="#2f6df6">
 <title>駕照筆試</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="駕照筆試">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -12,6 +17,7 @@
 <header id="topbar">
   <button class="icon" id="btn-back" hidden aria-label="返回">←</button>
   <h1 id="title">駕照筆試</h1>
+  <span id="netdot" hidden></span>
   <nav>
     <button class="icon" data-nav="home" aria-label="首頁">⌂</button>
     <button class="icon" data-nav="browse" aria-label="題庫">☰</button>
@@ -34,6 +40,7 @@
 
     <article id="card">
       <p id="q-meta"></p>
+      <p id="q-warn" hidden></p>
       <div id="q-stem"></div>
       <div id="q-images"></div>
       <div id="options"></div>
@@ -89,6 +96,8 @@
   </section>
 </main>
 
-<script src="/static/app.js"></script>
+<div id="boot" class="boot"><p>載入題庫…</p></div>
+
+<script type="module" src="/static/app.js"></script>
 </body>
 </html>

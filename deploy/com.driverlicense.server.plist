@@ -4,7 +4,19 @@
      裝法：cp 到 ~/Library/LaunchAgents/ → launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.driverlicense.server.plist
      停用：launchctl bootout gui/$(id -u)/com.driverlicense.server
      改 app/*.py：launchctl kickstart -k gui/$(id -u)/com.driverlicense.server
-     改本 plist：必須 bootout 再 bootstrap（kickstart 不重讀 plist）。 -->
+     改本 plist：必須 bootout 再 bootstrap（kickstart 不重讀 plist）。
+
+     對外入口是 tailscale serve（TLS 終結在 tailscaled，Let's Encrypt 真憑證）：
+       tailscale serve --bg --https=443 http://127.0.0.1:8006
+       → https://s-macbook-air.tail8c391d.ts.net/    （tailnet only，非 funnel）
+     為什麼非 HTTPS 不可：PWA 的 service worker 只在安全來源註冊，
+     http://100.118.39.104:8006 這種純 HTTP 的 LAN 位址一律被瀏覽器拒絕，
+     離線功能會整個失效（而且不會有錯誤訊息，只是靜靜地不生效）。
+
+     為什麼綁 127.0.0.1 而不是 Tailscale IP：serve 的回代來源是 tailscaled 自己，
+     連到本機的 100.x 位址會繞回 tun 介面而逾時（實測 TLS 握手成功、後端永遠不回應）。
+     綁 loopback 後也沒有任何通訊埠暴露在可路由介面上，姿態更緊。
+     檢修：ssh 進 felix 後 curl http://127.0.0.1:8006/ -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
@@ -15,9 +27,9 @@
     <string>-m</string>
     <string>uvicorn</string>
     <string>app.main:app</string>
-    <!-- 綁 Tailscale 介面 IP：只有 tailnet 看得到，不對 LAN、不對外 -->
+    <!-- 只綁 loopback：唯一入口是 tailscale serve，見檔頭 -->
     <string>--host</string>
-    <string>100.118.39.104</string>
+    <string>127.0.0.1</string>
     <string>--port</string>
     <string>8006</string>
   </array>

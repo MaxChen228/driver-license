@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import random
 from collections import Counter
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -32,8 +32,13 @@ def _cfg() -> srs.ReviewSettings:
     return srs.ReviewSettings.preset(db.preset_name(CONN))
 
 
-def _now():
-    return db.reference_now(CONN, srs.utcnow())
+def _now(at: datetime | None = None):
+    """作答時刻。
+
+    離線補送會帶著「當初真正作答的時間」回來，否則整批會被記成同一刻，
+    間隔與熱力圖都會失真。凍結時鐘仍然優先（暫停期間一律用 paused_at）。
+    """
+    return db.reference_now(CONN, at or srs.utcnow())
 
 
 def _deck_or_404(deck: str):
@@ -166,10 +171,17 @@ class AnswerIn(BaseModel):
     chosen: int = Field(ge=1, le=3)
     elapsed_ms: int | None = None
     guessed: bool = False  # 三選一有 33% 猜對率 —— 按了就把答對覆寫成 forgot
+    reviewed_at: datetime | None = None  # 離線作答的真實時刻
+    client_event_id: str | None = None   # 冪等鍵，重覆補送只算一次
 
 
 class RegradeIn(BaseModel):
     card_id: str
+
+
+class SyncIn(BaseModel):
+    answers: list[AnswerIn] = []
+    notes: dict[str, str] = {}
 
 
 def _question(card_id: str) -> dict:
@@ -181,8 +193,11 @@ def _question(card_id: str) -> dict:
 
 
 def _record(q: dict, chosen: int | None, correct: bool, remembered: bool,
-            elapsed_ms: int | None, before: srs.CardState) -> dict:
-    now = _now()
+            elapsed_ms: int | None, before: srs.CardState,
+            reviewed_at: datetime | None = None,
+            client_event_id: str | None = None) -> dict:
+    """呼叫端必須已持有 db.WRITE_LOCK（regrade 的 DELETE + 重打要在同一把鎖內）。"""
+    now = _now(reviewed_at)
     after = srs.apply_feedback(before, remembered, _cfg(), now)
     db.put_state(CONN, q["id"], after)
     db.log_event(
@@ -207,28 +222,41 @@ def _record(q: dict, chosen: int | None, correct: bool, remembered: bool,
         review_count_after=after.review_count,
         streak_after=after.review_streak,
         lapse_after=after.lapse_count,
+        client_event_id=client_event_id,
     )
     CONN.commit()  # 每答即寫：不抄 kg 的批次 flush（那是 SwiftData 的問題，不是這裡的）
     return {
+        "card_id": q["id"],
         "correct": correct,
         "answer": q["answer"],
         "remembered": remembered,
         "interval_hours": after.review_interval_hours,
         "next_review_at": db.iso(after.next_review_at),
+        "review_count": after.review_count,
         "streak": after.review_streak,
         "lapse_count": after.lapse_count,
     }
 
 
-@app.post("/api/answer")
-def answer(payload: AnswerIn):
+def _apply_answer(payload: AnswerIn) -> dict:
+    """呼叫端必須已持有 db.WRITE_LOCK。"""
     q = _question(payload.card_id)
     before = db.get_state(CONN, payload.card_id)
     if before is None:
         raise HTTPException(404, "card not seeded")
     correct = payload.chosen == q["answer"]
-    return _record(q, payload.chosen, correct, correct and not payload.guessed,
-                   payload.elapsed_ms, before)
+    return _record(
+        q, payload.chosen, correct, correct and not payload.guessed,
+        payload.elapsed_ms, before, payload.reviewed_at, payload.client_event_id,
+    )
+
+
+@app.post("/api/answer")
+def answer(payload: AnswerIn):
+    with db.WRITE_LOCK:
+        if payload.client_event_id and db.event_exists(CONN, payload.client_event_id):
+            raise HTTPException(409, "duplicate client_event_id")
+        return _apply_answer(payload)
 
 
 @app.post("/api/answer/regrade")
@@ -240,28 +268,119 @@ def regrade(payload: RegradeIn):
     這裡先用事件裡的 before 快照把卡片精確回捲，刪掉該事件，再以 forgot 重打一次。
     """
     q = _question(payload.card_id)
-    ev = CONN.execute(
-        "SELECT * FROM review_event WHERE card_id=? ORDER BY id DESC LIMIT 1",
-        (payload.card_id,),
-    ).fetchone()
-    if ev is None:
-        raise HTTPException(409, "no answer to regrade")
-    if ev["feedback"] == srs.FORGOT:
-        raise HTTPException(409, "already graded as forgot")
-    if ev["review_count_before"] is None:
-        raise HTTPException(409, "event predates regrade support")
+    with db.WRITE_LOCK:
+        ev = CONN.execute(
+            "SELECT * FROM review_event WHERE card_id=? ORDER BY id DESC LIMIT 1",
+            (payload.card_id,),
+        ).fetchone()
+        if ev is None:
+            raise HTTPException(409, "no answer to regrade")
+        if ev["feedback"] == srs.FORGOT:
+            raise HTTPException(409, "already graded as forgot")
+        if ev["review_count_before"] is None:
+            raise HTTPException(409, "event predates regrade support")
 
-    before = srs.CardState(
-        review_interval_hours=ev["interval_before"],
-        next_review_at=db.parse(ev["next_review_before"]),
-        last_reviewed_at=db.parse(ev["last_reviewed_before"]),
-        review_count=ev["review_count_before"],
-        lapse_count=ev["lapse_before"],
-        review_streak=ev["streak_before"],
-        last_review_feedback=ev["feedback_before"],
+        before = srs.CardState(
+            review_interval_hours=ev["interval_before"],
+            next_review_at=db.parse(ev["next_review_before"]),
+            last_reviewed_at=db.parse(ev["last_reviewed_before"]),
+            review_count=ev["review_count_before"],
+            lapse_count=ev["lapse_before"],
+            review_streak=ev["streak_before"],
+            last_review_feedback=ev["feedback_before"],
+        )
+        CONN.execute("DELETE FROM review_event WHERE id=?", (ev["id"],))
+        return _record(
+            q, ev["chosen"], bool(ev["correct"]), False, ev["elapsed_ms"], before,
+            db.parse(ev["reviewed_at"]), ev["client_event_id"],
+        )
+
+
+# ---------------------------------------------------------------- offline sync
+
+
+def _bootstrap_payload() -> dict:
+    """前端離線運作所需的一切（題目本身除外，那是 /data/*.json 由 SW 預先快取）。
+
+    有了它，前端就能在完全沒有網路時自己算出 unlearned/due/reviewed、建佇列、
+    跑排程 —— 伺服器只是同步的目的地，不是每翻一張卡的必要條件。
+    """
+    cfg = _cfg()
+    return {
+        "server_time": db.iso(srs.utcnow()),
+        "reference_time": db.iso(_now()),  # 凍結時鐘生效時會與 server_time 不同
+        "preset": db.preset_name(CONN),
+        "presets": list(srs.PRESETS),
+        "paused": db.get_setting(CONN, "paused", "0") == "1",
+        "paused_at": db.get_setting(CONN, "paused_at", "") or None,
+        "params": {
+            "initial_hours": cfg.initial_hours,
+            "remembered_mult": cfg.remembered_mult,
+            "forgot_mult": cfg.forgot_mult,
+            "min_hours": cfg.min_hours,
+            "max_hours": cfg.max_hours,
+        },
+        "decks": [
+            {
+                "deck": k,
+                "label": DECK_DATA[k].label,
+                "title": DECK_DATA[k].title,
+                "version": DECK_DATA[k].version,
+                "total": len(DECK_DATA[k].questions),
+                "categories": DECK_DATA[k].categories,
+                "url": f"/data/{k}.json",
+            }
+            for k in DECKS
+        ],
+        "states": db.all_states(CONN),
+        "notes": db.all_notes(CONN),
+    }
+
+
+@app.get("/api/bootstrap")
+def bootstrap():
+    return _bootstrap_payload()
+
+
+@app.post("/api/sync")
+def sync(payload: SyncIn):
+    """補送離線期間累積的作答與筆記，回傳權威狀態讓前端整份覆蓋。
+
+    照 reviewed_at 由舊到新重放 —— 順序錯了間隔就會算錯（同一張卡答兩次，
+    先後不同結果不同）。已經送成功過的 client_event_id 直接跳過，不重複計分。
+    """
+    applied, skipped, failed = [], [], []
+    ordered = sorted(
+        payload.answers,
+        key=lambda a: (a.reviewed_at or srs.utcnow(), a.client_event_id or ""),
     )
-    CONN.execute("DELETE FROM review_event WHERE id=?", (ev["id"],))
-    return _record(q, ev["chosen"], bool(ev["correct"]), False, ev["elapsed_ms"], before)
+    with db.WRITE_LOCK:
+        for a in ordered:
+            if a.client_event_id and db.event_exists(CONN, a.client_event_id):
+                skipped.append(a.client_event_id)
+                continue
+            try:
+                _apply_answer(a)
+                applied.append(a.client_event_id)
+            except HTTPException as exc:
+                failed.append({"client_event_id": a.client_event_id, "detail": exc.detail})
+
+        for card_id, body in payload.notes.items():
+            text = body.strip()
+            if text:
+                CONN.execute(
+                    """INSERT INTO note(card_id, body, updated) VALUES(?,?,?)
+                       ON CONFLICT(card_id) DO UPDATE SET body=excluded.body,
+                                                          updated=excluded.updated""",
+                    (card_id, text, db.iso(srs.utcnow())),
+                )
+            else:
+                CONN.execute("DELETE FROM note WHERE card_id=?", (card_id,))
+        CONN.commit()
+
+    out = _bootstrap_payload()
+    out["sync"] = {"applied": applied, "skipped": skipped, "failed": failed}
+    return out
 
 
 # ---------------------------------------------------------------- notes
@@ -454,6 +573,54 @@ app.mount("/images", StaticFiles(directory=DATA_DIR / "images"), name="images")
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
 
+@app.get("/data/{deck}.json")
+def deck_json(deck: str):
+    """整份題庫。service worker 預先快取這個 URL，離線時題目直接從 Cache Storage 讀。
+
+    兩份加起來 1.5 MB、gzip 後 179 KB —— 整包收進手機是零負擔的。
+    """
+    _deck_or_404(deck)
+    return FileResponse(
+        DATA_DIR / f"{deck}_questions.json",
+        media_type="application/json",
+        headers={"cache-control": "no-cache"},  # 由 SW 管快取，瀏覽器別自己壓一層舊的
+    )
+
+
+@app.get("/api/image-manifest")
+def image_manifest():
+    """354 張題目圖的清單，給 service worker 逐一 precache。"""
+    files = sorted(
+        f"/images/{p.relative_to(DATA_DIR / 'images').as_posix()}"
+        for p in (DATA_DIR / "images").rglob("*.png")
+    )
+    return {"count": len(files), "files": files}
+
+
+# sw.js 與 manifest 必須從根目錄供應：service worker 的控制範圍是它自己的路徑，
+# 掛在 /static/ 下就只能管 /static/ 底下的請求，整個 app 都不會被攔截。
+@app.get("/sw.js")
+def service_worker():
+    return FileResponse(
+        ROOT / "static" / "sw.js",
+        media_type="application/javascript",
+        headers={"cache-control": "no-cache", "service-worker-allowed": "/"},
+    )
+
+
+@app.get("/manifest.webmanifest")
+def web_manifest():
+    return FileResponse(
+        ROOT / "static" / "manifest.webmanifest", media_type="application/manifest+json"
+    )
+
+
+@app.get("/favicon.ico")
+def favicon():
+    return Response(status_code=204)
+
+
 @app.get("/")
 def index():
-    return FileResponse(ROOT / "static" / "index.html")
+    return FileResponse(ROOT / "static" / "index.html",
+                        headers={"cache-control": "no-cache"})

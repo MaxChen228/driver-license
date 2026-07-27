@@ -7,12 +7,19 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .srs import DEFAULT_PRESET, CardState
 
 DATA_DIR = Path(os.environ.get("DL_DATA_DIR", Path.home() / "driver-license-data"))
+
+# 單一連線被 FastAPI 的 threadpool 共用（check_same_thread=False）。一次作答是
+# UPDATE + INSERT + COMMIT 三步，兩個請求交錯時 A 的 COMMIT 會把 B 寫到一半的
+# 交易一起提交。單人一次按一題碰不到，但離線補送是「一次送一整批」，跟現場作答
+# 撞在一起的機率不再是零 —— 寫入路徑一律進這把鎖。
+WRITE_LOCK = threading.Lock()
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS card (
@@ -78,8 +85,15 @@ _ADDED_COLUMNS = {
         "streak_before": "INTEGER",
         "lapse_before": "INTEGER",
         "feedback_before": "INTEGER",
+        # 離線作答補送用：前端產生的 uuid。SQLite 的 UNIQUE 索引允許多個 NULL，
+        # 所以線上作答留白不會互撞，補送重覆送則會被索引擋下（見 log_event）。
+        "client_event_id": "TEXT",
     }
 }
+
+_ADDED_INDEXES = [
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_event_client ON review_event(client_event_id)",
+]
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -88,6 +102,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         for name, decl in cols.items():
             if name not in have:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+    for stmt in _ADDED_INDEXES:
+        conn.execute(stmt)
 
 
 def connect(path: Path | None = None) -> sqlite3.Connection:
@@ -151,6 +167,42 @@ def log_event(conn: sqlite3.Connection, **kw) -> None:
         f"INSERT INTO review_event({cols}) VALUES({','.join('?' * len(kw))})",
         tuple(kw.values()),
     )
+
+
+def event_exists(conn: sqlite3.Connection, client_event_id: str) -> bool:
+    """離線補送的冪等閘門：同一個 client_event_id 只能算一次分。
+
+    手機補送到一半斷線、使用者重新整理再送一次，是必然會發生的事；
+    沒有這道閘門就會被當成兩次作答，間隔連乘兩次、review_count 多算。
+    """
+    return conn.execute(
+        "SELECT 1 FROM review_event WHERE client_event_id=?", (client_event_id,)
+    ).fetchone() is not None
+
+
+def all_states(conn: sqlite3.Connection) -> list[dict]:
+    return [
+        {
+            "id": r["id"],
+            "deck": r["deck"],
+            "interval_hours": r["review_interval_hours"],
+            "next_review_at": r["next_review_at"],
+            "last_reviewed_at": r["last_reviewed_at"],
+            "review_count": r["review_count"],
+            "lapse_count": r["lapse_count"],
+            "streak": r["review_streak"],
+            "last_feedback": r["last_review_feedback"],
+        }
+        for r in conn.execute(
+            """SELECT id, deck, review_interval_hours, next_review_at, last_reviewed_at,
+                      review_count, lapse_count, review_streak, last_review_feedback
+               FROM card"""
+        )
+    ]
+
+
+def all_notes(conn: sqlite3.Connection) -> dict[str, str]:
+    return {r["card_id"]: r["body"] for r in conn.execute("SELECT card_id, body FROM note")}
 
 
 def get_setting(conn: sqlite3.Connection, key: str, default: str) -> str:
