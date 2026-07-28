@@ -67,6 +67,9 @@ uv run pytest                 # SRS + API + 帳號 + 遷移 + 跨裝置收斂
 bash deploy/run-server.sh     # 本機（沒有 secrets 檔就是開發模式）
 ```
 
+`.github/workflows/ci.yml` 在每次 push 跑 `pytest` 與 `tools/verify.py`。
+`ops/deploy.sh` 在重啟服務之前也會跑一次 `pytest` —— 測試不過就不會換版。
+
 ### 環境變數
 
 | 變數 | 預設 | 作用 |
@@ -119,14 +122,19 @@ v2 = 多租戶（每列都掛 `user_id`）、v3 = `review_event` 記下作答當
 ```bash
 ssh chenliangyu@100.118.39.104
 cd ~/project/driver-license
-bash ops/backup.sh                 # 先備份：下一步可能觸發不可逆的 schema 遷移
-git pull && uv sync
-launchctl kickstart -k gui/$(id -u)/com.driverlicense.server
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8006/api/decks   # 應為 200
+bash ops/deploy.sh
 ```
 
+`ops/deploy.sh` 依序做：前置檢查（服務在不在、工作區乾不乾淨）→ 備份 →
+`git pull && uv sync` → `pytest` → `kickstart` → 打 `/api/health` 確認程序活著、
+DB 開得起來、schema 遷到程式碼期待的版本。任何一步失敗就停下來並說明下一步。
+
 **備份要在 `git pull` 之前**：`ops/backup.sh` 的健檢閘跟著 schema 走，先 pull 的話
-新版腳本會對上還沒遷移的舊 DB，直接 exit 5。
+新版腳本會對上還沒遷移的舊 DB，直接 exit 5。這個順序約束正是把它寫成腳本的理由。
+
+**不要用 `/api/decks` 當 smoke check**：它掛了 `CurrentUser`，不帶 cookie 恆為 401 ——
+這一步曾經寫成「應為 200」，等於從來沒有真的驗到 app 有沒有起來。要驗用
+`/api/health`（不需認證，回 `ok` / `schema_version` / 題庫版本與題數）。
 
 ⚠️ 服務的 `WorkingDirectory` 就是這個 repo，`KeepAlive=true` —— uvicorn 直接 import
 工作目錄裡的 `app/`。**在 felix 上編輯這個 repo 等於在動生產環境**：程序只要重啟一次

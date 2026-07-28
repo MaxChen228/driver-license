@@ -689,6 +689,36 @@ def config():
     return _config_payload()
 
 
+@app.get("/api/health")
+def health():
+    """不需要認證的健康檢查。給部署腳本、監控與還原演練用。
+
+    為什麼需要它：README 原本教人用 `curl /api/decks` 當部署後的 smoke check
+    並期待 200，但那個端點掛了 CurrentUser —— 不帶 cookie 恆為 401。也就是
+    那一步從來沒有真的驗到「app 起來了」，而且照抄進腳本會直接誤判成失敗。
+
+    回的是三件事：程序活著、DB 開得起來（真的下一次查詢，不是只回 200）、
+    題庫載進記憶體了。schema 版本一起回，因為部署腳本要確認就地遷移真的跑完
+    ——它是一個小整數，而題庫版本與題數本來就在公開的 /api/config 裡，
+    這裡沒有多洩漏任何東西，尤其沒有任何跟使用者有關的東西。
+
+    no-store：健康狀態被 Cloudflare 或瀏覽器快取住的話，這個端點就是在說謊。
+    """
+    with db.session() as conn:
+        schema = conn.execute("PRAGMA user_version").fetchone()[0]
+    return JSONResponse(
+        {
+            "ok": True,
+            "schema_version": schema,
+            "decks": {
+                k: {"version": DECK_DATA[k].version, "questions": len(DECK_DATA[k].questions)}
+                for k in DECKS
+            },
+        },
+        headers={"cache-control": "no-store"},
+    )
+
+
 @app.get("/api/state")
 def state(user: sqlite3.Row = CurrentUser):
     with db.session() as conn:

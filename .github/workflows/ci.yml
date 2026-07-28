@@ -1,0 +1,35 @@
+# 132 個測試一直都在，但沒有任何東西自動跑它們 —— 部署是 git pull && kickstart，
+# 測試不過照樣上線。ops/deploy.sh 現在會在重啟前跑一次，這裡則是更早的一道：
+# push 上來就知道，而不是等到站在 felix 前面才發現。
+name: tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      # --frozen：uv.lock 與 pyproject.toml 對不上就失敗，而不是安靜地解出
+      # 一組跟本機不同的依賴 —— 那會讓 CI 綠燈失去意義。
+      - run: uv sync --frozen
+      - run: uv run pytest -q
+
+  # 題庫守門員。抽取很容易「看起來對」（題數對、編號連續、每題三個選項），
+  # 實際上少了半句話或多算了一個字 —— 這支做的是字元級對帳。
+  # 約 8 秒，而且來源 PDF 就在 repo 裡，沒有理由不跑。
+  bank:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run python tools/verify.py

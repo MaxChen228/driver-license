@@ -214,3 +214,28 @@ def test_app_shell_stays_no_cache(client):
     離線由 SW 負責，這裡不為了省流量退讓。"""
     for path in ["/", "/static/app.js", "/static/style.css", "/sw.js"]:
         assert client.get(path).headers["cache-control"] == "no-cache", path
+
+
+def test_health_needs_no_auth_and_reports_schema_and_banks(anon_client):
+    """部署後的 smoke check 打的就是這裡，所以它必須在「沒有 cookie」時就是 200。
+
+    README 原本教人用 /api/decks 當這一步，但那個端點要認證、實際回 401 ——
+    等於那一步從來沒驗到 app 有沒有起來。
+    """
+    r = anon_client.get("/api/health")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    # 遷移真的跑完了才算健康；部署腳本比對的就是這個數字
+    assert body["schema_version"] == 3
+    assert body["decks"]["car"]["questions"] == 1090
+    assert body["decks"]["moto"]["questions"] == 806
+    # 健康狀態被快取住的話這個端點就是在說謊
+    assert r.headers["cache-control"] == "no-store"
+
+
+def test_health_leaks_nothing_user_specific(anon_client):
+    """公網上唯一不需要認證的動態端點 —— 回傳內容必須只有公開事實。"""
+    body = anon_client.get("/api/health").json()
+    assert set(body) == {"ok", "schema_version", "decks"}
+    assert set(body["decks"]["car"]) == {"version", "questions"}
