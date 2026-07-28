@@ -468,9 +468,20 @@ function paintVerdict(r, chosen) {
   $("#options").querySelectorAll(".opt").forEach((b) => {
     const n = Number(b.dataset.n);
     b.disabled = true;
-    // 顏色不是唯一線索：正解與誤選各自帶一個圖示，色盲與強光下都讀得出來
-    if (n === r.answer) { b.classList.add("correct"); b.querySelector(".mark").innerHTML = ico("check"); }
-    else if (n === chosen) { b.classList.add("wrong"); b.querySelector(".mark").innerHTML = ico("x"); }
+    // 顏色不是唯一線索：正解與誤選各自帶一個圖示，色盲與強光下都讀得出來。
+    // 但 class 與圖示都是純視覺的 —— 螢幕閱讀器逐項瀏覽時完全讀不出哪個是正解，
+    // 所以同一件事也要寫進無障礙名稱。
+    const body = b.querySelector(".body").textContent.trim();
+    const label = (prefix) => `${prefix}，選項 ${n}${body ? "：" + body : ""}`;
+    if (n === r.answer) {
+      b.classList.add("correct");
+      b.querySelector(".mark").innerHTML = ico("check");
+      b.setAttribute("aria-label", label("正解"));
+    } else if (n === chosen) {
+      b.classList.add("wrong");
+      b.querySelector(".mark").innerHTML = ico("x");
+      b.setAttribute("aria-label", label("你選的，答錯"));
+    }
   });
   const v = $("#verdict-text");
   v.textContent = r.correct ? "答對" : "答錯";
@@ -486,6 +497,21 @@ function paintVerdict(r, chosen) {
   $("#verdict").hidden = false;
   $("#next-bar").hidden = false;
   ensureVisible($("#verdict"));
+  announce(
+    (r.correct ? "答對" : `答錯，正解是選項 ${r.answer}`) +
+    `。下次複習 ${fmtDue(r.next_review_at)}。`
+  );
+  // 焦點原本留在剛剛按下、而且已經 disabled 的那顆選項上 —— disabled 的元素
+  // 不能有焦點，於是整個掉回 body：鍵盤使用者要重新 Tab 一輪，螢幕閱讀器的
+  // 游標也回到頁首。交給下一題，接下來的動作就在手上。
+  $("#btn-next").focus({ preventScroll: true });
+}
+
+// 螢幕閱讀器播報。同一段文字連送兩次不會被唸第二次，而「答對」後面接「答對」
+// 是這個 app 最常見的序列 —— 補一個零寬字元讓內容確實有變化。
+function announce(text) {
+  const el = $("#sr-live");
+  el.textContent = el.textContent === text ? text + "​" : text;
 }
 
 // 判定出現後把它捲進畫面 —— 只補不足的那一段，不重新定位整頁（使用者的視線
@@ -602,6 +628,11 @@ document.addEventListener("keydown", (e) => {
   if (e.target.tagName === "TEXTAREA" || e.target.tagName === "INPUT") return;
   if (["1", "2", "3"].includes(e.key)) { submit(Number(e.key)); e.preventDefault(); }
   else if (e.key === " " || e.key === "Enter") {
+    // 答完題之後焦點會被移到「下一題」上（見 paintVerdict）。那時空白鍵／Enter
+    // 已經是這顆按鈕自己的啟用行為，這裡再叫一次 next() 就會一次跳兩題 ——
+    // 理論上 preventDefault() 會擋掉原生啟用，但那條路徑在這裡驗不到（自動化
+    // 環境送不進真實鍵盤事件），而代價是安靜地漏掉一題。直接讓路，不賭。
+    if (e.target === $("#btn-next")) return;
     if (S && S.answered) { next(); e.preventDefault(); }
   } else if (e.key.toLowerCase() === "g") { $("#btn-guessed").click(); }
   else if (e.key.toLowerCase() === "s") { $("#btn-shuffle").click(); }
@@ -649,6 +680,7 @@ function refreshBrowse() {
       ? `<img class="thumb" src="/${q.images[0].file}" alt="" loading="lazy" decoding="async">` : "";
     return `<button class="row" data-id="${q.id}">
       <span class="dot ${stateOf(q.id)}" title="${STATE_LABEL[stateOf(q.id)]}"></span>
+      <span class="sr-only">${STATE_LABEL[stateOf(q.id)]}</span>
       <span class="num">${q.number}</span>
       ${thumb}
       <span class="txt">${esc(q.stem_is_image ? "（圖片題）" : q.stem)}</span>

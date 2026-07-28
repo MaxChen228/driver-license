@@ -54,6 +54,12 @@
   --color-accent-press: #ae1800;   /* accent-700 */
   --color-divider: color-mix(in srgb, #201e1d 40%, transparent);
   --color-rule: color-mix(in srgb, #201e1d 18%, transparent);
+  /* 小字標籤的統一色。原本 50%／55%／60% 散落各處，實測（複合 alpha 後算
+     WCAG）：.barlabels 的 50% 只有 3.89:1，明確未達 AA；55% 的那批落在
+     4.53–4.63:1，帳面上剛過 4.5，但那個門檻是給 ~16px 內文的，而這些字是
+     10–11px 全大寫又拉了 0.08em 字距。統一提到 68%（實測 ~6.3:1），
+     階層仍在（68% vs 內文 100%），但在強光下的手機上讀得出來。 */
+  --color-muted: color-mix(in srgb, var(--color-text) 68%, transparent);
 
   --color-neutral-100: #f8f4f4;
   --color-neutral-200: #eae7e7;
@@ -181,11 +187,18 @@ button { font: inherit; color: inherit; }
   font-weight: 600;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: color-mix(in srgb, var(--color-text) 55%, transparent);
+  color: var(--color-muted);
   margin: 0;
 }
 .kicker-accent { color: var(--color-accent); }
-.muted { color: color-mix(in srgb, var(--color-text) 60%, transparent); font-size: 14px; }
+.muted { color: var(--color-muted); font-size: 14px; }
+
+/* 只給螢幕閱讀器。不能用 display:none 或 visibility:hidden —— 那兩個會把節點
+   一起從無障礙樹上拿掉，播報區就永遠不會被唸到。 */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0;
+}
 
 
 /* ── icons ──────────────────────────────────────────────────────────── */
@@ -225,12 +238,14 @@ button { font: inherit; color: inherit; }
 .btn-ghost { color: var(--color-accent); padding-inline: var(--space-2); }
 .btn-ghost:hover:not(:disabled) { background: color-mix(in srgb, var(--color-accent) 10%, transparent); }
 .btn-ghost:active:not(:disabled) { background: color-mix(in srgb, var(--color-accent) 18%, transparent); }
-.btn-icon { width: 40px; min-height: 40px; height: 40px; padding: 0; }
+/* 44px 是 Apple HIG 的下限，而這幾顆是全 app 唯一沒有文字標籤的按鈕（返回、
+   四個導覽鍵）—— 按錯的代價最高，尺寸不該是第一個被犧牲的。 */
+.btn-icon { width: 44px; min-height: 44px; height: 44px; padding: 0; }
 /* 系統規定：比標籤寬的按鈕，文字從左內距開始，永遠不置中 */
 .btn-block { width: 100%; justify-content: flex-start; text-align: left; }
 .btn-block .btn-trail { margin-left: auto; }
 .btn-lg { min-height: 56px; font-size: 16px; padding-inline: var(--space-4); }
-.btn-sm { min-height: 34px; font-size: 13px; padding: 6px var(--space-3); }
+.btn-sm { min-height: 40px; font-size: 13px; padding: 8px var(--space-3); }
 
 /* ── forms ──────────────────────────────────────────────────────────── */
 .field-label {
@@ -353,7 +368,7 @@ main {
 }
 .sec .sec-note {
   margin-left: auto; letter-spacing: 0; text-transform: none; font-weight: 400;
-  color: color-mix(in srgb, var(--color-text) 55%, transparent);
+  color: var(--color-muted);
 }
 .view > .sec:first-child { margin-top: 0; }
 
@@ -388,7 +403,7 @@ main {
 .metric span {
   display: block; margin-top: 4px;
   font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
-  color: color-mix(in srgb, var(--color-text) 55%, transparent);
+  color: var(--color-muted);
 }
 .metric.is-accent b { color: var(--color-accent); }
 
@@ -412,7 +427,7 @@ main {
   flex: 1; min-width: 0; margin: 0;
   font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
   font-variant-numeric: tabular-nums;
-  color: color-mix(in srgb, var(--color-text) 60%, transparent);
+  color: var(--color-muted);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 #btn-shuffle { flex: none; }
@@ -436,7 +451,7 @@ main {
    所以用 muted 的小字，與 20px 粗體的真題幹拉開兩級。 */
 #q-stem.is-fallback {
   font-size: 15px; font-weight: 400;
-  color: color-mix(in srgb, var(--color-text) 65%, transparent);
+  color: var(--color-muted);
 }
 
 /* 圖片題的圖就是題目本身 —— 置中，否則卡片重心整個偏左。
@@ -468,7 +483,7 @@ main {
   border-right: 1px solid var(--color-divider);
   font-family: var(--font-heading); font-weight: var(--font-heading-weight);
   font-size: 14px;
-  color: color-mix(in srgb, var(--color-text) 55%, transparent);
+  color: var(--color-muted);
 }
 .opt .body {
   flex: 1; min-width: 0;
@@ -509,21 +524,21 @@ main {
   font-size: 20px; letter-spacing: -0.015em;
 }
 #verdict-text.bad { color: var(--color-accent); }
-#verdict-sched { margin: 0 0 var(--space-3); font-size: 13px; color: color-mix(in srgb, var(--color-text) 60%, transparent); }
+#verdict-sched { margin: 0 0 var(--space-3); font-size: 13px; color: var(--color-muted); }
 
 #note-box { margin-top: var(--space-4); border-top: 1px solid var(--color-divider); padding-top: var(--space-3); }
 #note-box summary {
   cursor: pointer; list-style: none;
   display: flex; align-items: center; gap: 6px;
   font-size: 11px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;
-  color: color-mix(in srgb, var(--color-text) 60%, transparent);
+  color: var(--color-muted);
 }
 #note-box summary::-webkit-details-marker { display: none; }
 #note-box summary:hover { color: var(--color-accent); }
 #note-box[open] summary .ico { transform: rotate(90deg); }
 #note-box summary .ico { transition: transform .12s linear; }
 #note-box textarea { margin-top: var(--space-3); }
-#note-status { margin: 6px 0 0; font-size: 12px; color: color-mix(in srgb, var(--color-text) 55%, transparent); }
+#note-status { margin: 6px 0 0; font-size: 12px; color: var(--color-muted); }
 
 /* 桌機快捷鍵提示：只有真的有實體指標（滑鼠／觸控板 → 多半也有鍵盤）
    而且寬度夠時才出現。觸控裝置顯示它只是浪費一行。 */
@@ -593,7 +608,7 @@ main {
   flex: none; width: 44px;
   font-family: var(--font-heading); font-weight: var(--font-heading-weight);
   font-size: 12px; font-variant-numeric: tabular-nums;
-  color: color-mix(in srgb, var(--color-text) 50%, transparent);
+  color: var(--color-muted);
 }
 /* min-width:0 是必要的：flex item 預設 min-width:auto，配上 nowrap 會撐破容器、
    讓整個版面溢出 max-width 並產生橫向捲動，ellipsis 也永遠不會生效。 */
@@ -612,6 +627,15 @@ main {
 /* 學習狀態：零圓角的系統裡，圓點變方塊。lapsed 另外用 accent 標籤標次數，
    不跟 due 搶同一個紅色 —— 兩個都紅就等於沒有區別。 */
 .dot { flex: none; width: 9px; height: 9px; border: 1px solid var(--color-divider); background: transparent; }
+/* 狀態圖例。原本三種狀態的說明只活在 title 屬性裡，而觸控裝置沒有 hover ——
+   在這個 app 的主要平台上等於完全沒有說明。 */
+.legend {
+  display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4);
+  margin: 0 0 var(--space-2);
+  font-size: 12px; color: var(--color-muted);
+}
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend .dot { display: block; }
 .dot.due { background: var(--color-accent); border-color: var(--color-accent); }
 .dot.reviewed { background: var(--color-text); border-color: var(--color-text); }
 
@@ -630,7 +654,7 @@ main {
 .tile span {
   display: block; margin-top: 4px;
   font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
-  color: color-mix(in srgb, var(--color-text) 55%, transparent);
+  color: var(--color-muted);
 }
 
 .chart { border-bottom: var(--rule-strong) solid var(--color-divider); }
@@ -638,7 +662,7 @@ main {
 .bars div { flex: 1; background: var(--color-accent); min-height: 2px; }
 .bars div.empty { background: var(--color-rule); }
 .barlabels { display: flex; gap: 3px; margin-top: var(--space-2); font-size: 10px;
-             color: color-mix(in srgb, var(--color-text) 50%, transparent); font-variant-numeric: tabular-nums; }
+             color: var(--color-muted); font-variant-numeric: tabular-nums; }
 .barlabels span { flex: 1; text-align: center; min-width: 0; }
 
 /* ── settings ───────────────────────────────────────────────────────── */
@@ -647,20 +671,22 @@ main {
   padding: var(--space-3) 0 var(--space-6);
 }
 .set-block h3 { font-size: 18px; margin: 0 0 var(--space-2); }
-.set-block p { font-size: 14px; color: color-mix(in srgb, var(--color-text) 68%, transparent); }
+.set-block p { font-size: 14px; color: var(--color-muted); }
 .set-block > :last-child { margin-bottom: 0; }
 .switch { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); }
 .switch > span { font-size: 15px; }
 .kv { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-4); margin: 0 0 var(--space-3); font-size: 13px; }
 .kv div { display: flex; gap: 6px; }
-.kv dt { color: color-mix(in srgb, var(--color-text) 55%, transparent); }
+.kv dt { color: var(--color-muted); }
 .kv dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; }
 
 /* ── 窄螢幕 ─────────────────────────────────────────────────────────── */
 @media (max-width: 380px) {
   body { font-size: 15px; }
   .nav-brand { font-size: 16px; }
-  .btn-icon { width: 36px; height: 36px; min-height: 36px; }
+  /* 這裡原本把圖示鍵縮到 36px。窄螢幕正是最需要按得準的情境，縮的應該是
+     字級與留白，不是唯一沒有文字標籤的那組按鈕 —— 44px 在 320px 寬下仍放得下
+     （返回 44 + 四鍵 44×4 + 間距 6 = 226，扣掉左右 28 的留白還剩 66 給標題）。 */
   .metric b { font-size: 24px; }
   #q-stem { font-size: 18px; }
   main { padding-top: var(--space-4); }
@@ -717,4 +743,4 @@ main {
 .recovery code {
   font-size: 18px; letter-spacing: .06em; word-break: break-all; color: var(--color-text);
 }
-.recovery span { font-size: 13px; color: color-mix(in srgb, var(--color-text) 65%, transparent); }
+.recovery span { font-size: 13px; color: var(--color-muted); }

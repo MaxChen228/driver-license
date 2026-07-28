@@ -17,6 +17,12 @@
 </head>
 <body>
 
+<!-- 螢幕閱讀器專用的播報區。不直接把 aria-live 掛在 #verdict 上：那個節點是
+     hidden ↔ 顯示地切換，各家 AT 對「隱藏中變更內容再顯示」的處理不一致，
+     實際會不會唸出來要看實作。寫進一個一直存在、只換文字的節點才是確定的。
+     答對答錯是這個 app 唯一的即時回饋，不能只有視覺。 -->
+<p id="sr-live" class="sr-only" role="status" aria-live="polite"></p>
+
 <!-- Lucide 圖示（系統指定的圖示集）。用 sprite 而不是逐處內嵌：
      同一個 path 在 app.js 產生的 HTML 裡會重複出現幾十次。 -->
 <svg id="icon-sprite" aria-hidden="true">
@@ -44,7 +50,7 @@
     <svg class="ico"><use href="#i-back"></use></svg>
   </button>
   <h1 class="nav-brand" id="title">駕照筆試</h1>
-  <span id="netdot" class="tag" hidden></span>
+  <span id="netdot" class="tag" role="status" hidden></span>
   <nav class="nav-links">
     <button class="btn btn-icon" data-nav="home" aria-label="首頁"><svg class="ico"><use href="#i-home"></use></svg></button>
     <button class="btn btn-icon" data-nav="browse" aria-label="題庫"><svg class="ico"><use href="#i-list"></use></svg></button>
@@ -93,7 +99,7 @@
       <details id="note-box">
         <summary><svg class="ico ico-sm"><use href="#i-chevron"></use></svg>我的筆記</summary>
         <textarea id="note" class="input" rows="4" placeholder="為什麼選這個？寫下自己的判斷依據。"></textarea>
-        <p id="note-status"></p>
+        <p id="note-status" role="status" aria-live="polite"></p>
       </details>
     </article>
 
@@ -139,6 +145,13 @@
         <label class="chk"><input type="checkbox" id="br-noted"><span class="box"><svg class="ico"><use href="#i-check"></use></svg></span>只看有筆記</label>
       </div>
     </div>
+    <!-- 三種狀態原本只靠 9px 方塊的顏色 + title 屬性說明，而 title 在觸控裝置上
+         不存在（沒有 hover）—— 也就是這個 app 的主要平台完全看不到那份說明。 -->
+    <p class="legend">
+      <span><i class="dot"></i>未學習</span>
+      <span><i class="dot due"></i>待複習</span>
+      <span><i class="dot reviewed"></i>已複習</span>
+    </p>
     <div class="sec">題目<span class="sec-note" id="br-count"></span></div>
     <div id="br-list" class="rows"></div>
   </section>
