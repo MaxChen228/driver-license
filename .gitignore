@@ -1,5 +1,6 @@
 .DS_Store
 *.log
+.claude/worktrees/
 .venv/
 __pycache__/
 *.pyc
@@ -9,3 +10,8 @@ __pycache__/
 *.db
 *.db-wal
 *.db-shm
+
+# 危險感知影片：原始檔 0.70 GB、轉檔後的播放版另計，都不進 git。
+# 原始檔由 tools/fetch_hazard_videos.py 從公路局重抓得到，是可重生的。
+data/source/videos/
+data/videos/

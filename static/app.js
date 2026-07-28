@@ -305,13 +305,27 @@ function shuffled(a) {
   return x;
 }
 
+// 官方資源。這個 app 是拿公路局公告的題庫做的複習工具，不是監理所的一部分 ——
+// 把正本擺在看得到的地方，使用者要對答案、要正式模擬考時知道去哪。
+// rel="noopener" 是必須的：少了它，被開的分頁能透過 window.opener 改寫這一頁。
+const OFFICIAL_LINKS = `
+  <section class="official">
+    <p class="kicker">官方資源</p>
+    <a class="btn btn-secondary" href="https://www.mvdis.gov.tw/m3-simulator-drv/index"
+       target="_blank" rel="noopener noreferrer">監理服務網　線上模擬考</a>
+    <a class="btn btn-secondary" href="https://hpt.thb.gov.tw/"
+       target="_blank" rel="noopener noreferrer">公路局　機車危險感知教育平台</a>
+    <p class="muted">題庫與影片皆為交通部公路局公告內容，本站僅作複習之用。</p>
+  </section>`;
+
 // ── 首頁 ──────────────────────────────────────────────
 function renderHome() {
   $("#view-home").innerHTML =
     CONFIG.decks.map((d) => deckCard(d, counts(d.deck))).join("") +
     (SNAP.paused
       ? `<p class="home-note tag tag-accent">${ico("pause", "ico ico-sm")}時鐘已凍結 —— 到期時間不會推進</p>`
-      : "");
+      : "") +
+    OFFICIAL_LINKS;
 
   $("#view-home").querySelectorAll("[data-start]").forEach((b) =>
     b.addEventListener("click", () =>
@@ -381,6 +395,18 @@ function loadCard() {
   $("#btn-shuffle").disabled = S.ids.length - S.i < 2;
   $("#q-meta").textContent = `${q.id}　${q.architecture}`;
   $("#q-stem").textContent = q.stem;
+
+  // 危險感知題：先看影片再作答。preload="none" 是刻意的 —— 一份題庫上百支影片，
+  // 預載會在使用者還沒決定要看之前就把行動網路吃掉；poster 讓未播放的畫面
+  // 不是一塊空白（iOS 尤其明顯）。playsinline 擋掉 iOS 自動全螢幕接管。
+  const vbox = $("#q-video");
+  vbox.hidden = !q.video;
+  vbox.innerHTML = q.video
+    ? `<video controls playsinline preload="none" poster="/videos/${q.video}.jpg">
+         <source src="/videos/${q.video}.mp4" type="video/mp4">
+       </video>
+       <p class="vid-no">影片 ${esc(q.video_no || "")}</p>`
+    : "";
 
   // 題幹是圖的題目（汽車 95 題、機車 126 題）沒有文字題幹，圖就是題目本身
   const stemImgs = q.options.some((o) => o.is_image) ? [] : q.images;
@@ -618,8 +644,12 @@ function refreshBrowse() {
       ? `<span class="tag tag-accent trail">錯 ${st.lapse_count}</span>` : "";
     // 圖片題在清單裡只剩「（圖片題）」四個字，等於認不出來。放張縮圖，
     // 圖本來就已經在 Cache Storage 裡，lazy 載入不花任何網路。
-    const thumb = q.images && q.images.length
-      ? `<img class="thumb" src="/${q.images[0].file}" alt="" loading="lazy" decoding="async">` : "";
+    // 危險感知題同理，用影片的 poster —— 那張圖 30 KB 上下，比影片便宜三個數量級。
+    const thumbSrc = q.video
+      ? `/videos/${q.video}.jpg`
+      : q.images && q.images.length ? `/${q.images[0].file}` : "";
+    const thumb = thumbSrc
+      ? `<img class="thumb" src="${thumbSrc}" alt="" loading="lazy" decoding="async">` : "";
     return `<button class="row" data-id="${q.id}">
       <span class="dot ${stateOf(q.id)}" title="${STATE_LABEL[stateOf(q.id)]}"></span>
       <span class="num">${q.number}</span>

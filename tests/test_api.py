@@ -1,6 +1,10 @@
 """API 端到端測試。用臨時 DL_DATA_DIR，不碰真實進度。"""
 
+from pathlib import Path
+
 import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture(scope="module")
@@ -178,6 +182,26 @@ def test_service_worker_shell_list_matches_disk(client):
     assert "/static/style.css" in urls and "/static/fonts/archivo-latin.woff2" in urls
     for u in urls:
         assert client.get(u).status_code == 200, u
+
+
+def test_every_css_variable_is_defined():
+    """style.css 不得引用任何沒定義過的自訂屬性。
+
+    CSS 對未定義的 var() 是 invalid-at-computed-value-time：整個宣告退成 unset，
+    邊框直接消失、顏色掉回 inherit，而且完全沒有錯誤訊息 —— 靠肉眼看不出來。
+    commit 243ce79 修過一次（--line / --muted / --accent 三個不存在的名字讓救援碼
+    那個「刻意要擋住流程」的框完全沒有框），當時只做了一次性的人工檢查，
+    後來又再犯一次。這次釘進測試。
+
+    帶 fallback 的 var(--x, ...) 一樣要求 --x 存在：fallback 是給「這個值可能
+    沒設」用的，不是給打錯字用的。
+    """
+    import re
+
+    css = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+    defined = set(re.findall(r"(--[\w-]+)\s*:", css))
+    used = set(re.findall(r"var\(\s*(--[\w-]+)", css))
+    assert not (used - defined), f"用了沒定義的自訂屬性：{sorted(used - defined)}"
 
 
 def test_bank_and_images_are_cacheable_at_the_edge(client):

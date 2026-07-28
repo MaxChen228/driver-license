@@ -973,13 +973,17 @@ IMMUTABLE = "public, max-age=31536000, immutable"
 
 
 class _Images(StaticFiles):
-    """題目圖：一年、immutable。
+    """題目圖與危險感知影片：一年、immutable。
 
-    檔名是題號（C0001_1.png），內容綁定題號、不會就地改版 —— 題庫改版是換一份
-    JSON，圖檔要嘛沿用、要嘛換名字，所以「同一個網址的內容永遠不變」是成立的。
+    題目圖的檔名是題號（C0001_1.png），內容綁定題號、不會就地改版 —— 題庫改版是
+    換一份 JSON，圖檔要嘛沿用、要嘛換名字，所以「同一個網址的內容永遠不變」成立。
 
-    這件事在公網上的份量與內網完全不同：354 張圖 1.8 MB，每個新訪客都回原站的話
-    走的是家用上行。給了 immutable，CF 邊緣才擋得下來。
+    影片更乾脆：檔名就是「原始檔 md5 ＋ 轉檔參數」的雜湊（見
+    tools/transcode_hazard_videos.py），內容變了檔名一定跟著變，
+    immutable 是這裡最誠實的標頭。
+
+    這件事在公網上的份量與內網完全不同：354 張圖 1.8 MB 加上影片幾百 MB，
+    每個新訪客都回原站的話走的是家用上行。給了 immutable，CF 邊緣才擋得下來。
     """
 
     async def get_response(self, path, scope):
@@ -1012,6 +1016,7 @@ class _Static(StaticFiles):
 
 
 app.mount("/images", _Images(directory=DATA_DIR / "images"), name="images")
+app.mount("/videos", _Images(directory=DATA_DIR / "videos"), name="videos")
 app.mount("/static", _Static(directory=ROOT / "static"), name="static")
 
 

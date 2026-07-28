@@ -157,7 +157,9 @@ def main() -> int:
     for tag, path, fn in specs:
         rows = fn(path)
         ok &= audit(tag, rows)
-        out = ROOT / "data" / f"hazard_{tag}.json"
+        # 中間產物，跟它的來源 PDF 放一起。前端吃的是 tools/build_hazard_decks.py
+        # 產生的 data/hazard_{tag}_questions.json。
+        out = SRC / f"hazard_{tag}.json"
         out.write_text(
             json.dumps(
                 {"deck": tag, "kind": "hazard", "source": path.name,

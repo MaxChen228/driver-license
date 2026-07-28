@@ -26,7 +26,10 @@ def test_config_is_public_and_carries_the_bank_catalogue(anon_client):
     c = anon_client.get("/api/config")
     assert c.status_code == 200
     b = c.json()
-    assert {d["deck"] for d in b["decks"]} == {"car", "moto"}
+    # 每一份題庫都要出現在目錄裡 —— 少一份，前端就完全看不到它
+    from app.deck import DECKS
+
+    assert {d["deck"] for d in b["decks"]} == set(DECKS)
     assert b["presets"] == ["relaxed", "intensive"]
     assert b["default_preset"] == "relaxed"
     # 版號進 URL：題庫換版才換網址，邊緣與瀏覽器才能長期快取又不會拿到舊的
