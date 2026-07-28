@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -202,6 +203,50 @@ def test_every_css_variable_is_defined():
     defined = set(re.findall(r"(--[\w-]+)\s*:", css))
     used = set(re.findall(r"var\(\s*(--[\w-]+)", css))
     assert not (used - defined), f"用了沒定義的自訂屬性：{sorted(used - defined)}"
+
+
+def test_video_origin_opens_the_csp_it_needs(tmp_path, monkeypatch):
+    """影片搬到 R2 之後，CSP 必須同時開 media-src 與 img-src。
+
+    這是會安靜壞掉的那種：media-src 沒寫就 fallback 到 default-src 'self'，
+    <video> 被擋成一塊放不出來的黑框，console 以外沒有任何跡象。poster 走的是
+    img-src 不是 media-src，兩個都要開 —— 只開一個的話影片能播但清單縮圖全空。
+
+    同時釘住預設（未設環境變數）不得有 media-src：內網／開發是同源供應，
+    多開一個口沒有理由。
+    """
+    import importlib
+
+    from tests.conftest import data_dir_env
+
+    def csp_and_config(origin):
+        if origin is None:
+            monkeypatch.delenv("DL_VIDEO_ORIGIN", raising=False)
+        else:
+            monkeypatch.setenv("DL_VIDEO_ORIGIN", origin)
+        with data_dir_env(tmp_path / (origin or "none").replace("/", "_")):
+            import app.db
+            import app.main
+
+            importlib.reload(app.db)
+            main = importlib.reload(app.main)
+            c = TestClient(main.app, base_url="https://testserver")
+            return c.get("/").headers["content-security-policy"], \
+                c.get("/api/config").json()["video_origin"]
+
+    csp, origin = csp_and_config(None)
+    assert origin == ""
+    assert "media-src" not in csp
+
+    r2 = "https://videos.wordnexus.lol"
+    csp, origin = csp_and_config(r2)
+    assert origin == r2
+    assert f"media-src 'self' {r2}" in csp
+    assert f"img-src 'self' data: {r2}" in csp
+
+    # 尾斜線不該產生 "…lol//videos/x.mp4"
+    _, origin = csp_and_config(r2 + "/")
+    assert origin == r2
 
 
 def test_bank_and_images_are_cacheable_at_the_edge(client):

@@ -173,6 +173,10 @@ self.addEventListener("fetch", (e) => {
   //
   // 目前靠 HTTP 層的 immutable（檔名是內容雜湊）處理重看，那已經足夠。
   // 「下載離線影片包」要做的話是獨立的一步，屆時再在這裡加。
+  //
+  // 注意：影片搬到 R2 之後這段連跑都不會跑 —— 上面的跨來源 return 就先攔掉了，
+  // 連 poster 也不再進 Cache Storage（改由 HTTP 的 immutable 負責）。
+  // 這是可接受的：poster 一張 80 KB 上下，而且離線本來就播不了影片。
   if (url.pathname.startsWith("/videos/") && !url.pathname.endsWith(".jpg")) return;
 
   // 題庫與圖片：快取優先。內容是靜態的，沒有新鮮度問題。

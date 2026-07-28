@@ -37,6 +37,12 @@ ROOT = Path(__file__).resolve().parent.parent
 # 那才是真正有價值的那份（實測過：docs_url=None 時 /openapi.json 仍回 200）。
 IS_PROD = os.environ.get("DL_ENV") == "prod"
 
+# 危險感知影片放哪。空字串（預設）＝ 由本服務從 data/videos/ 供應，開發與內網用。
+# 設成 "https://videos.wordnexus.lol" 就改由 R2 直出：333 MB 走家用上行撐不住，
+# 而 R2 的 egress 免費、又在同一個 CF 帳號底下。
+# 一個環境變數同時決定三件事，不能各自為政：前端組網址、CSP 開口、SW 略過快取。
+VIDEO_ORIGIN = os.environ.get("DL_VIDEO_ORIGIN", "").rstrip("/")
+
 app = FastAPI(
     title="driver-license",
     docs_url=None if IS_PROD else "/api/docs",
@@ -146,6 +152,12 @@ async def security_middleware(request: Request, call_next):
         "form-action 'self'",
         "frame-ancestors 'none'",
     ]
+    # 影片搬到 R2 之後就不再是同源，而 media-src 沒寫的話會 fallback 到
+    # default-src 'self' —— <video> 會被 CSP 擋掉，畫面上是一塊放不出來的黑框，
+    # console 以外沒有任何跡象。img-src 一併開，poster 走的是 img-src 不是 media-src。
+    if VIDEO_ORIGIN:
+        csp.append(f"media-src 'self' {VIDEO_ORIGIN}")
+        csp[1] = f"img-src 'self' data: {VIDEO_ORIGIN}"
     # Turnstile 要載入 challenges.cloudflare.com 的 script 與 iframe。沒啟用就不要開這個口。
     if TURNSTILE_SITEKEY:
         csp.append("script-src 'self' https://challenges.cloudflare.com")
@@ -650,6 +662,10 @@ def _config_payload() -> dict:
         # 有設 sitekey 前端才渲染 widget。兩者必須一起開：只設 secret 而前端沒有
         # widget 的話，每一次註冊都會拿到「人機驗證未通過」，而且看不出為什麼。
         "turnstile_sitekey": TURNSTILE_SITEKEY or None,
+        # 影片的來源。空字串＝同源的 /videos（開發與內網）；正式站指向 R2。
+        # 由伺服器下發而不是寫死在 app.js：換儲存後端不必動前端，而且 SW 已經
+        # 在快取 /api/config，離線時也知道該去哪（雖然離線本來就播不了影片）。
+        "video_origin": VIDEO_ORIGIN,
         "decks": [
             {
                 "deck": k,

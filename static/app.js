@@ -305,6 +305,12 @@ function shuffled(a) {
   return x;
 }
 
+// 影片網址。CONFIG.video_origin 是空字串時走同源的 /videos（開發與內網），
+// 指到 R2 時就直出 —— 前端不必知道是哪一種，換後端不用改這裡。
+function videoUrl(key, ext) {
+  return `${CONFIG.video_origin || ""}/videos/${key}.${ext}`;
+}
+
 // 官方資源。這個 app 是拿公路局公告的題庫做的複習工具，不是監理所的一部分 ——
 // 把正本擺在看得到的地方，使用者要對答案、要正式模擬考時知道去哪。
 // rel="noopener" 是必須的：少了它，被開的分頁能透過 window.opener 改寫這一頁。
@@ -402,8 +408,8 @@ function loadCard() {
   const vbox = $("#q-video");
   vbox.hidden = !q.video;
   vbox.innerHTML = q.video
-    ? `<video controls playsinline preload="none" poster="/videos/${q.video}.jpg">
-         <source src="/videos/${q.video}.mp4" type="video/mp4">
+    ? `<video controls playsinline preload="none" poster="${videoUrl(q.video, "jpg")}">
+         <source src="${videoUrl(q.video, "mp4")}" type="video/mp4">
        </video>
        <p class="vid-no">影片 ${esc(q.video_no || "")}</p>`
     : "";
@@ -646,7 +652,7 @@ function refreshBrowse() {
     // 圖本來就已經在 Cache Storage 裡，lazy 載入不花任何網路。
     // 危險感知題同理，用影片的 poster —— 那張圖 30 KB 上下，比影片便宜三個數量級。
     const thumbSrc = q.video
-      ? `/videos/${q.video}.jpg`
+      ? videoUrl(q.video, "jpg")
       : q.images && q.images.length ? `/${q.images[0].file}` : "";
     const thumb = thumbSrc
       ? `<img class="thumb" src="${thumbSrc}" alt="" loading="lazy" decoding="async">` : "";
