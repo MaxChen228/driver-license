@@ -710,6 +710,14 @@ function renderBrowse() {
   show("browse");
 }
 
+// 分批渲染。原本硬切前 400 題：汽車有 1090 題，一開就被截掉六成，而且沒有
+// 分頁也沒有捲動載入 —— 第 401 題之後只能靠搜尋碰運氣。整份 innerHTML 一次
+// 塞完也不是辦法（400 列就已經是 1672 個節點）。改成一次 60 列，捲到底再補。
+const BROWSE_PAGE = 80;
+let brItems = [];
+let brShown = 0;
+let brTail = null;
+
 function refreshBrowse() {
   const d = BANK[$("#br-deck").value];
   const term = $("#br-q").value.trim();
@@ -717,7 +725,7 @@ function refreshBrowse() {
   const wrongOnly = $("#br-wrong").checked;
   const notedOnly = $("#br-noted").checked;
 
-  const items = d.questions.filter((q) => {
+  brItems = d.questions.filter((q) => {
     if (cat && q.category !== cat) return false;
     const st = SNAP.states.get(q.id);
     if (wrongOnly && !(st && st.lapse_count)) return false;
@@ -726,35 +734,75 @@ function refreshBrowse() {
     return true;
   });
 
-  $("#br-count").textContent =
-    `${items.length} 題` + (items.length > 400 ? "（顯示前 400 題）" : "");
-  $("#br-list").innerHTML = items.slice(0, 400).map((q) => {
-    const st = SNAP.states.get(q.id);
-    // 答錯次數不再跟「到期」搶同一個紅點（兩個都紅等於沒有區別），改成獨立標籤
-    const lapses = st && st.lapse_count
-      ? `<span class="tag tag-accent trail">錯 ${st.lapse_count}</span>` : "";
-    // 圖片題在清單裡只剩「（圖片題）」四個字，等於認不出來。放張縮圖，
-    // 圖本來就已經在 Cache Storage 裡，lazy 載入不花任何網路。
-    const thumb = q.images && q.images.length
-      ? `<img class="thumb" src="/${q.images[0].file}" alt="" loading="lazy" decoding="async">` : "";
-    return `<button class="row" data-id="${q.id}">
-      <span class="dot ${stateOf(q.id)}" title="${STATE_LABEL[stateOf(q.id)]}"></span>
-      <span class="sr-only">${STATE_LABEL[stateOf(q.id)]}</span>
-      <span class="num">${q.number}</span>
-      ${thumb}
-      <span class="txt">${esc(q.stem_is_image ? "（圖片題）" : q.stem)}</span>
-      ${lapses}
-    </button>`;
-  }).join("");
-  $("#br-list").querySelectorAll(".row").forEach((b) =>
-    b.addEventListener("click", () => {
-      // kind 為 null＝這不是「一輪」，做完直接回首頁而不是給結算（見 finishRound）
-      S = { ids: [b.dataset.id], i: 0, deck: $("#br-deck").value, kind: null,
-            right: 0, guessed: 0 };
-      show("session"); loadCard();
-    })
-  );
+  $("#br-count").textContent = `${brItems.length} 題`;
+  $("#br-list").innerHTML = "";
+  brShown = 0;
+  appendRows();
 }
+
+function rowHtml(q) {
+  const st = SNAP.states.get(q.id);
+  // 答錯次數不再跟「到期」搶同一個紅點（兩個都紅等於沒有區別），改成獨立標籤
+  const lapses = st && st.lapse_count
+    ? `<span class="tag tag-accent trail">錯 ${st.lapse_count}</span>` : "";
+  // 圖片題在清單裡只剩「（圖片題）」四個字，等於認不出來。放張縮圖，
+  // 圖本來就已經在 Cache Storage 裡，lazy 載入不花任何網路。
+  const thumb = q.images && q.images.length
+    ? `<img class="thumb" src="/${q.images[0].file}" alt="" loading="lazy" decoding="async">` : "";
+  return `<button class="row" data-id="${q.id}">
+    <span class="dot ${stateOf(q.id)}" title="${STATE_LABEL[stateOf(q.id)]}"></span>
+    <span class="sr-only">${STATE_LABEL[stateOf(q.id)]}</span>
+    <span class="num">${q.number}</span>
+    ${thumb}
+    <span class="txt">${esc(q.stem_is_image ? "（圖片題）" : q.stem)}</span>
+    ${lapses}
+  </button>`;
+}
+
+function appendRows() {
+  const more = $("#br-more");
+  if (more) more.remove();
+  const slice = brItems.slice(brShown, brShown + BROWSE_PAGE);
+  $("#br-list").insertAdjacentHTML("beforeend", slice.map(rowHtml).join(""));
+  brShown += slice.length;
+
+  const rest = brItems.length - brShown;
+  if (!rest) { if (brTail) brTail.disconnect(); return; }
+  // 尾端放一顆真的按鈕，而不是一個看不見的哨兵 div。它同時是兩件事：
+  // IntersectionObserver 的觀察對象（捲到就自動補，使用者不會看到它），
+  // 以及 IO 沒有運作時的手動出口。無限捲動全押在 IO 上的失敗模式是「清單
+  // 安靜地停在第 80 題」，比原本硬切 400 還糟；有這顆按鈕就退化成多按一下。
+  $("#br-list").insertAdjacentHTML(
+    "beforeend",
+    `<button class="btn btn-secondary btn-block br-more" id="br-more">載入更多（還有 ${rest} 題）</button>`
+  );
+  watchTail();
+}
+
+// 監看尾端那顆按鈕，進入視野（含 400px 的預載距離）就補下一批。每次都先
+// disconnect：舊按鈕已經被換掉了，留著只會在往回捲時重覆觸發。
+function watchTail() {
+  if (!brTail) {
+    brTail = new IntersectionObserver(
+      (entries) => { if (entries.some((e) => e.isIntersecting)) appendRows(); },
+      { rootMargin: "400px" }
+    );
+  }
+  brTail.disconnect();
+  const more = $("#br-more");
+  if (more) brTail.observe(more);
+}
+
+// 事件委派：列是分批產生的，逐列掛 listener 會漏掉後來補上的那些
+$("#br-list").addEventListener("click", (e) => {
+  if (e.target.closest("#br-more")) return appendRows();
+  const row = e.target.closest(".row");
+  if (!row) return;
+  // kind 為 null＝這不是「一輪」，做完直接回首頁而不是給結算（見 finishRound）
+  S = { ids: [row.dataset.id], i: 0, deck: $("#br-deck").value, kind: null,
+        right: 0, guessed: 0 };
+  show("session"); loadCard();
+});
 ["#br-q", "#br-cat", "#br-wrong", "#br-noted"].forEach((s) =>
   $(s).addEventListener("input", refreshBrowse)
 );

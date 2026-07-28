@@ -511,6 +511,12 @@ main {
 .opt.wrong .mark { color: var(--color-accent); }
 @media (prefers-color-scheme: dark) {
   .opt.wrong { color: var(--color-text); }
+  /* 題目圖是從 PDF 裁下來的，底色是實心的近白（實測四角都是 #fefefe、不透明），
+     所以在暗地面上是一塊 260px 的手電筒。降亮度而不是套灰階：交通標誌的顏色
+     本身就是答案的一部分（紅圈禁制 vs 藍底指示），色相必須留著。
+     filter 作用在整個元素上，連它自己的白色 padding 一起壓暗，所以圖與襯底
+     不會出現亮邊。0.8 是「不刺眼」與「標誌還讀得清楚」之間的取捨。 */
+  #q-images img, .opt img, .row .thumb { filter: brightness(0.8); }
 }
 
 #verdict {
@@ -612,6 +618,9 @@ main {
   color: var(--color-text);
   transition: background-color .1s linear;
 }
+/* 清單尾端的載入鍵。列是靠分隔線組織的，這顆不能長得像其中一列 —— 拉開
+   一段留白並置中，讓它讀起來是「清單到這裡」而不是「第 81 題」。 */
+.br-more { margin: var(--space-4) 0; justify-content: center; }
 .row:hover { background: var(--tint-1); }
 .row:active { background: var(--tint-2); }
 .row .num {
@@ -625,11 +634,15 @@ main {
 .row .txt { flex: 1; min-width: 0; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row .trail { flex: none; margin-left: auto; }
 
-/* 圖片題的縮圖：負的 block margin 讓它不參與列高計算 —— 34px 的圖扣掉上下各
-   5px 之後，外框高度剛好等於文字那行的 24px，有圖與沒圖的列一樣高。
-   （靠 min-height 撐是不夠的：那會把所有沒圖的列一起變高。） */
+/* 圖片題的縮圖。原本是 34px，靠負的 block margin 讓它不撐高列 —— 代價是
+   實測完全認不出來：原圖 145×145 的交通標誌縮到 34px 就是一個白方塊，而
+   「讓圖片題在清單裡認得出來」正是放縮圖的唯一理由（那些列的文字全都是
+   「（圖片題）」，汽車有 95 題長一模一樣）。
+   改成 48px，並把整列的 min-height 一起拉到 56px：有圖沒圖的列仍然等高，
+   而且順便讓每一列都超過 44px 的觸控下限。 */
+.row { min-height: 56px; }
 .row .thumb {
-  flex: none; width: 34px; height: 34px; margin-block: -5px;
+  flex: none; width: 48px; height: 48px;
   object-fit: contain; background: #fff;
   border: 1px solid var(--color-divider);
 }
