@@ -82,6 +82,10 @@ async function boot() {
   // 第一筆歷史要帶 state，否則從首頁按返回時 popstate 的 e.state 是 null，
   // 分不出「回到 app 的第一頁」與「離開 app」。
   history.replaceState({ view: "home" }, "");
+  // 捲動位置由我們自己還原（見 show() 與 renderBrowse）。留著 auto 的話，
+  // 瀏覽器會在 popstate 後把捲軸拉回它記的位置，而那時清單才剛重建、頁面
+  // 還沒那麼高，拉不到就無聲失敗 —— 兩套機制互相打架，結果是都不準。
+  history.scrollRestoration = "manual";
   renderHome();
 }
 
@@ -447,7 +451,17 @@ function renderDeckChooser() {
   show("home");
 }
 
-function show(view) {
+// replace: true = 這一步「取代」目前這格歷史，而不是往上疊一格。
+// 用在離開之後就回不去的畫面（作答結束 → 結算 → 再來一輪）：那些畫面若各自
+// 佔一格，返回鍵會一路踩過一串已經死掉的格子 —— 畫面完全不動，按到第三、四下
+// 才突然整個離開 app。使用者的體感是「返回壞了」，而那正是這裡要修的。
+function show(view, { replace = false } = {}) {
+  // 離開題庫前記下捲動位置與已載入的長度。題庫是唯一會捲很長的頁（1090 題、
+  // 一次補 80 列），回來從頭開始等於整個位置都白找了。
+  if (CURRENT === "browse" && view !== "browse") {
+    brResume = { count: brShown, y: window.scrollY };
+  }
+  CURRENT = view;
   VIEWS.forEach((v) => ($(`#view-${v}`).hidden = v !== view));
   $("#title").textContent = TITLES[view];
   $("#btn-back").hidden = view !== "session";
@@ -461,20 +475,29 @@ function show(view) {
   // 會直接離開 app（standalone 模式下就是關掉它），而不是回到上一頁 ——
   // 這是 PWA 最常見的體感缺陷，而且使用者只會覺得「這個 app 怪怪的」。
   // 網址不變（單頁 app 沒有路由），只是讓返回有東西可退。
-  if (!popping && (!history.state || history.state.view !== view)) {
-    history.pushState({ view }, "");
-  }
+  if (popping) return;
+  if (replace || !history.state) history.replaceState({ view }, "");
+  else if (history.state.view !== view) history.pushState({ view }, "");
 }
 
 // popstate 期間不能再 push，否則每按一次返回就補回一筆，永遠退不出去。
 let popping = false;
+// 目前顯示的畫面。history.state 不能拿來當這個用 —— 它是「歷史上的那一格」，
+// 在還原不了的情況下會與畫面不一致（下面 renderView 就是在修那件事）。
+let CURRENT = "home";
 
 function renderView(view) {
   if (view === "browse") return renderBrowse();
   if (view === "stats") return renderStats();
   if (view === "settings") return renderSettings();
-  // 作答中途離開再返回：S 還在就回到原本那張卡；不在就只能回首頁
+  // 作答中途離開再返回：S 還在就回到原本那張卡
   if (view === "session" && S) return show("session");
+  // 走到這裡＝這一格還原不了（結算畫面、或作答已經結束的 session）。
+  // 除了改顯示首頁，還必須把這一格的 state 一起改掉：否則畫面是首頁、歷史
+  // 卻還記著 session，下次真的進作答時 show() 會因為「state 已經是 session」
+  // 而不推歷史，返回鍵就會一次退掉兩層。這是同一個 bug 的另一半。
+  history.replaceState({ view: "home" }, "");
+  CURRENT = "home";
   return renderHome();
 }
 
@@ -498,16 +521,20 @@ window.addEventListener("popstate", async (e) => {
 let ROUND = 20;
 const ROUND_CHOICES = [10, 20, 30, 50, 0];
 
-function startSession(deck, kind, category) {
+// from = 這一輪是從哪個畫面開的（首頁／統計的「最常答錯」／題庫）。結算畫面
+// 的出口按鈕靠它決定要送人回哪裡 —— 從統計進來卻只給「回首頁」，等於把人丟到
+// 一個他沒去過的地方，還得自己找路回去。
+function startSession(deck, kind, category, opts) {
   const ids = buildQueue(deck, kind, category);
   if (!ids.length) return renderHome();
   S = {
     ids: ROUND > 0 ? ids.slice(0, ROUND) : ids,
     i: 0, deck, kind, category,
+    from: (opts && opts.from) || CURRENT,
     answered: false, cardId: null, t0: 0,
     right: 0, guessed: 0,
   };
-  show("session");
+  show("session", opts);
   loadCard();
 }
 
@@ -761,14 +788,18 @@ function next() {
 
 function finishRound() {
   // 題庫頁點單一題進來的那條路沒有 kind，不是「一輪」，也沒有結算可言。
-  if (!S.kind) { S = null; return renderHome(); }
+  // 回上一頁而不是回首頁：人是從題庫的某個搜尋結果、捲到一半的位置點進來的，
+  // 做完一題把他丟到首頁，等於要他把剛才那段路重走一次。
+  if (!S.kind) { S = null; return history.back(); }
   const r = {
-    deck: S.deck, kind: S.kind, category: S.category,
+    deck: S.deck, kind: S.kind, category: S.category, from: S.from,
     total: S.ids.length, right: S.right, guessed: S.guessed,
   };
   S = null;
   renderDone(r);
 }
+
+const BACK_LABEL = { home: "回首頁", stats: "回統計", browse: "回題庫" };
 
 function renderDone(r) {
   // 剩幾題要重新算，不能拿原本佇列的尾巴 —— 剛剛答過的那些已經不再到期／未學，
@@ -786,15 +817,21 @@ function renderDone(r) {
         : "這副牌目前沒有到期或未學的題目了。"}</p>
       <div class="done-actions">
         ${remaining ? `<button class="btn" id="done-again">再來一輪${ico("right", "ico btn-trail")}</button>` : ""}
-        <button class="btn" id="done-home">回首頁${ico("right", "ico btn-trail")}</button>
+        <button class="btn" id="done-home">${BACK_LABEL[r.from] || "回首頁"}${ico("right", "ico btn-trail")}</button>
       </div>
     </div>`;
   // 這個畫面是動態產生的，接不到檔尾那個一次性的 [data-nav] 綁定
   if (remaining) {
-    $("#done-again").addEventListener("click", () => startSession(r.deck, r.kind, r.category));
+    // replace：新的一輪取代結算這一格。不然做十輪就疊十格結算 + 十格作答，
+    // 而那二十格全部是回不去的死格子。
+    $("#done-again").addEventListener("click", () =>
+      startSession(r.deck, r.kind, r.category, { replace: true, from: r.from }));
   }
-  $("#done-home").addEventListener("click", renderHome);
-  show("done");
+  // 出口就是「退回開這一輪的那個畫面」—— history.back() 正好是那一格，
+  // 而且順手把結算這格從歷史上抹掉。
+  $("#done-home").addEventListener("click", () => history.back());
+  // 結算取代作答那一格：一輪做完就回不去了，那一格留著只會擋在返回的路上。
+  show("done", { replace: true });
   announce(`本輪完成，答對 ${r.right} 題，共 ${r.total} 題。`);
 }
 
@@ -839,12 +876,27 @@ document.addEventListener("keydown", (e) => {
 const STATE_LABEL = { unlearned: "未學習", due: "待複習", reviewed: "已複習" };
 
 function renderBrowse() {
+  // 先取走再清空：refreshBrowse 會重建清單，而下面的還原要在那之後才做得成
+  const resume = brResume;
+  brResume = null;
+
   fillDeckSelect("#br-deck");
   const d = BANK[$("#br-deck").value];
+  // 分類選單每次都重建（換題庫時分類本來就不同），但**選到的那一項要留著**。
+  // 原本無條件重建 = 挑了分類、點一題進去、做完回來，篩選被清成「全部分類」，
+  // 而搜尋字與兩個勾選卻都還在 —— 同一排控制項有兩種記性，最像壞掉的那種。
+  const cat = $("#br-cat").value;
   $("#br-cat").innerHTML = `<option value="">全部分類</option>` +
     d.categories.map((c) => `<option value="${esc(c.category)}">${esc(c.category)}</option>`).join("");
+  if (cat && d.categories.some((c) => c.category === cat)) $("#br-cat").value = cat;
+
   refreshBrowse();
+  // 補回離開前已經載入的長度，否則捲軸還沒那麼高，捲不回去
+  if (resume) {
+    while (brShown < resume.count && $("#br-more")) appendRows();
+  }
   show("browse");
+  if (resume) window.scrollTo(0, resume.y);
 }
 
 // 分批渲染。原本硬切前 400 題：汽車有 1090 題，一開就被截掉六成，而且沒有
@@ -854,6 +906,8 @@ const BROWSE_PAGE = 80;
 let brItems = [];
 let brShown = 0;
 let brTail = null;
+// 離開題庫那一刻的「已載入幾列、捲到哪裡」。由 show() 記、renderBrowse 還原。
+let brResume = null;
 
 function refreshBrowse() {
   const d = BANK[$("#br-deck").value];
@@ -939,9 +993,9 @@ $("#br-list").addEventListener("click", (e) => {
   if (e.target.closest("#br-more")) return appendRows();
   const row = e.target.closest(".row");
   if (!row) return;
-  // kind 為 null＝這不是「一輪」，做完直接回首頁而不是給結算（見 finishRound）
+  // kind 為 null＝這不是「一輪」，做完退回上一頁而不是給結算（見 finishRound）
   S = { ids: [row.dataset.id], i: 0, deck: $("#br-deck").value, kind: null,
-        right: 0, guessed: 0 };
+        from: CURRENT, right: 0, guessed: 0 };
   show("session"); loadCard();
 });
 ["#br-q", "#br-cat", "#br-wrong", "#br-noted"].forEach((s) =>
@@ -953,6 +1007,11 @@ $("#br-deck").addEventListener("change", renderBrowse);
 async function renderStats() {
   fillDeckSelect("#st-deck");
   const deck = $("#st-deck").value;
+  // 先切畫面，資料晚一點填。原本整段算完才 show()：登入時中間卡著一次
+  // /api/stats，那段時間畫面還停在上一頁 —— 按了返回或按了「統計」看起來
+  // 像沒反應，慢的網路上會被連按第二次。切換必須是立即的。
+  if (!$("#st-body").innerHTML.trim()) $("#st-body").innerHTML = `<p class="muted">計算中…</p>`;
+  show("stats");
   // 登入且有網路才問伺服器。匿名模式沒有伺服器可問，但本機的事件日誌
   // 含有完整歷史，正確率與連續天數一樣算得出來。
   let s = null;
@@ -1004,7 +1063,9 @@ async function renderStats() {
   $("#st-body").querySelectorAll("[data-cat]").forEach((b) =>
     b.addEventListener("click", () => startSession(deck, "all", b.dataset.cat))
   );
-  show("stats");
+  // 資料填完期間使用者可能已經切走了（統計要等 /api/stats）。那就別再動高度，
+  // 也別把畫面搶回來 —— 隱藏中的容器 clientHeight 是 0，算出來是一排 2px。
+  if (CURRENT !== "stats") return;
 
   // 長條用像素而不是百分比：每一欄上方多了一行數值標籤，百分比是相對整欄算的，
   // 100% 的那根會把標籤擠出容器。扣掉標籤高度之後用像素才對得準。
@@ -1213,6 +1274,10 @@ async function renderSettings() {
       <p>答錯是把間隔乘上 ${p.forgot_mult}、不是打回新卡。排到 30 天的題答錯後回到 15 天，累積的記憶強度會保留。</p>
     </div>`;
 
+  // 畫面先切過去，兩個要查 IndexedDB／Cache Storage 的數字晚一點填 ——
+  // 切換頁面不該等 I/O（同 renderStats）。
+  show("settings");
+
   $("#set-pending").textContent = signedIn()
     ? `待補送的作答：${await store.outboxCount()} 筆`
     : `這台裝置的作答紀錄：${await store.eventsCount()} 筆（只存在本機）`;
@@ -1240,7 +1305,6 @@ async function renderSettings() {
       navigator.serviceWorker.controller.postMessage("precache-images");
     flash($("#set-precache"), "下載中…");
   });
-  show("settings");
 }
 
 // ── 帳號 ──────────────────────────────────────────────
