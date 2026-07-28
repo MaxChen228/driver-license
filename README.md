@@ -164,6 +164,12 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8006/api/decks   # 應
 
 ### 驗證
 
+⚠️ **用 curl 驗「CF 有沒有動我們的 HTML」是驗不出來的。** CF 的 HTML 改寫只對
+「看起來像瀏覽器」的請求生效，curl 拿到的是原封不動的原始碼。實際踩過：
+上線後 curl 與源站逐位元組相同，但瀏覽器裡多了一個 Cloudflare Web Analytics 的
+beacon script（被我們的 CSP 擋下、沒有執行，但標籤確實被插進去了）。
+要驗就得開瀏覽器看 `document.scripts`。
+
 ```bash
 curl -sI https://drive.wordnexus.lol/images/car/C0001_1.png | grep -i cache-control   # immutable
 curl -s -o /dev/null -w '%{http_code}\n' https://drive.wordnexus.lol/api/state       # 401
