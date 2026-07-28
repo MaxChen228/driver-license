@@ -1795,7 +1795,9 @@ async function cacheReport() {
     }
   }
   if (!banks) return "題庫還沒下載到這台裝置 —— 現在是連線才能用。";
-  return `題庫 ${banks} / 2 份、題目圖 ${imgs} 張已存在這台裝置，可完全離線使用。`;
+  // 分母問 CONFIG，不要寫死 —— 寫死的那個 2 是危險感知兩份題庫加進來之前的
+  // 數字，現在有四份，畫面上印出來的是「題庫 4 / 2 份」。
+  return `題庫 ${banks} / ${CONFIG.decks.length} 份、題目圖 ${imgs} 張已存在這台裝置，可完全離線使用。`;
 }
 
 // ── service worker ────────────────────────────────────

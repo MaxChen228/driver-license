@@ -749,12 +749,25 @@ main {
 .barlabels span { flex: 1; text-align: center; min-width: 0; }
 
 /* ── settings ───────────────────────────────────────────────────────── */
-.set-block {
-  border-top: var(--rule-strong) solid var(--color-divider);
-  padding: var(--space-3) 0 var(--space-6);
+/* 與首頁同一套規則：一個設定 = 一個有邊界的區塊。原本每塊只在頭頂掛一條 2px
+   線，一頁九條橫線由上往下排，既不圍合也不分組。 */
+#set-body { display: grid; gap: var(--space-4); }
+@media (min-width: 820px) {
+  /* start 而不是 stretch（首頁是 stretch）：首頁的卡片底部有東西可以貼齊，
+     設定沒有 —— 拉等高只會讓「複習節奏」那種兩行的卡片留下半張空白。
+     這裡每張卡自己收到內容為止，列首仍然對齊。 */
+  #set-body { grid-template-columns: 1fr 1fr; align-items: start; }
 }
-.set-block h3 { font-size: 18px; margin: 0 0 var(--space-2); }
-.set-block p { font-size: 14px; color: var(--color-muted); }
+.set-block {
+  background: var(--color-surface);
+  border: 1px solid var(--color-divider);
+  padding: var(--space-4);
+}
+.set-block h3 { font-size: 17px; margin: 0 0 var(--space-2); }
+/* 說明文字與控制項都不該橫跨整個 880px：一行 90 個字讀不動，而一個「20 題」
+   的下拉選單拉成滿版只是在強調它不重要的那一半。 */
+.set-block p { font-size: 14px; color: var(--color-muted); max-width: 54ch; }
+.set-block .input { max-width: 22rem; }
 .set-block > :last-child { margin-bottom: 0; }
 .switch { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); }
 .switch > span { font-size: 15px; }
@@ -821,7 +834,9 @@ main {
 .recovery {
   display: flex; flex-direction: column; gap: var(--space-1);
   margin-top: var(--space-3); padding: var(--space-4);
-  border: 2px solid var(--color-accent); background: var(--color-surface);
+  /* 設定區塊本身已經是 surface 了，這裡再用同一個色就沒有內外之分 —— 救援碼
+     那塊的重點正是「它跟周圍不一樣，停下來看」。改用地面色，反差回來。 */
+  border: 2px solid var(--color-accent); background: var(--color-bg);
 }
 .recovery code {
   font-size: 18px; letter-spacing: .06em; word-break: break-all; color: var(--color-text);
