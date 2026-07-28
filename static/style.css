@@ -753,15 +753,13 @@ main {
    線，一頁九條橫線由上往下排，既不圍合也不分組。 */
 #set-body { display: grid; gap: var(--space-4); }
 @media (min-width: 820px) {
-  /* start 而不是 stretch（首頁是 stretch）：首頁的卡片底部有東西可以貼齊，
-     設定沒有 —— 拉等高只會讓「複習節奏」那種兩行的卡片留下半張空白。
-     這裡每張卡自己收到內容為止，列首仍然對齊。 */
-  #set-body { grid-template-columns: 1fr 1fr; align-items: start; }
+  #set-body { grid-template-columns: 1fr 1fr; align-items: stretch; }
 }
 .set-block {
   background: var(--color-surface);
   border: 1px solid var(--color-divider);
   padding: var(--space-4);
+  display: flex; flex-direction: column;
 }
 .set-block h3 { font-size: 17px; margin: 0 0 var(--space-2); }
 /* 說明文字與控制項都不該橫跨整個 880px：一行 90 個字讀不動，而一個「20 題」
@@ -769,6 +767,11 @@ main {
 .set-block p { font-size: 14px; color: var(--color-muted); max-width: 54ch; }
 .set-block .input { max-width: 22rem; }
 .set-block > :last-child { margin-bottom: 0; }
+/* 同一列的卡片等高（見上面的 stretch），所以矮的那張會被拉長。auto 把它的
+   控制項推到卡片底部 —— 左右兩張的選單／按鈕於是落在同一條基線上，多出來的
+   高度看起來是刻意留的白，而不是沒填滿。純說明文字（:not(p)）不推：把一段
+   文字懸在卡片底部只會讓標題與內文之間裂開一個洞。 */
+.set-block > :last-child:not(p) { margin-top: auto; }
 .switch { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); }
 .switch > span { font-size: 15px; }
 .kv { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-4); margin: 0 0 var(--space-3); font-size: 13px; }
