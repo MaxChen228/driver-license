@@ -728,7 +728,14 @@ function accuracyText(server, local) {
 // 沒有「答過幾次、對幾次、哪幾天答的」。events 兩種模式都寫，所以匿名也有得算。
 async function localStats(deck) {
   const now = refNow();
-  const day0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  // 日界用 UTC，不是本地。原本 day0 取本地午夜、再用 toISOString() 印成標籤 ——
+  // UTC+8 的本地午夜等於前一天 16:00Z，於是整排日期退一天：實測今天 7/28、
+  // X 軸第一格卻標 27，卡片說「3 天後（7/31）」而長條落在標著 30 的格子上。
+  // 對齊伺服器而不是改成本地：app/main.py 的 forecast_14d 與 day_key 都取 UTC 的
+  // date()，上面算連續天數的地方也已經為了同一個理由用 UTC。兩邊必須是同一套，
+  // 否則同一個人登入前後會看到兩張不一樣的圖。
+  const utcDay = (d) => Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  const day0 = utcDay(now);
   const buckets = new Array(14).fill(0);
   let answered = 0;
   const worst = new Map();
@@ -739,9 +746,7 @@ async function localStats(deck) {
     answered += st.review_count;
     if (st.lapse_count) worst.set(q.category, (worst.get(q.category) || 0) + st.lapse_count);
     if (!st.next_review_at) continue;
-    const d = new Date(st.next_review_at);
-    const idx = Math.max(0, Math.round(
-      (new Date(d.getFullYear(), d.getMonth(), d.getDate()) - day0) / 86400e3));
+    const idx = Math.max(0, Math.round((utcDay(new Date(st.next_review_at)) - day0) / 86400e3));
     if (idx < 14) buckets[idx] += 1;
   }
 
@@ -768,7 +773,7 @@ async function localStats(deck) {
     accuracy: total ? ok / total : null,
     streak,
     forecast: buckets.map((count, i) => ({
-      day: new Date(day0.getTime() + i * 86400e3).toISOString().slice(0, 10), count,
+      day: new Date(day0 + i * 86400e3).toISOString().slice(0, 10), count,
     })),
     worst: [...worst.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10)
       .map(([category, lapses]) => ({ category, lapses })),
@@ -910,6 +915,25 @@ async function leaveAccount() {
   await persist();
 }
 
+// 未登入時的帳號區塊分三種模式。原本把登入與註冊擠在同一組欄位裡，代價有三個：
+//   1. 密碼欄只能掛一種 autocomplete（原本是 current-password），於是註冊時
+//      密碼管理器不會提議產生新密碼，只會塞一組已經在用的舊密碼 —— 對一個
+//      「至少 10 字、且擋外洩清單」的 app 來說正好是反效果。
+//   2. 兩顆按鈕並排時「登入」是裸 .btn（透明底 + 透明框）＝看起來不像按鈕，
+//      次要的「註冊新帳號」反而有框，主要動作的視覺權重是反的。
+//   3. 沒有地方放「忘記密碼」。/api/auth/recover 早就實作好了，但前端沒有任何
+//      入口 —— 註冊時告訴使用者「救援碼是唯一能拿回帳號的東西」，然後不給那條路。
+//      忘記密碼在這個 app 等於帳號永久失聯（沒有 email 可以寄）。
+let acctMode = "login";
+
+const ACCT_MODES = [["login", "登入"], ["register", "註冊"], ["recover", "用救援碼重設"]];
+const ACCT_SUBMIT = { login: "登入", register: "建立帳號", recover: "重設密碼" };
+const ACCT_INTRO = {
+  login: "在另一台裝置登入同一個帳號，兩邊的進度就會合起來算。",
+  register: "現在的進度只存在這台裝置上。要在手機與電腦之間同步，才需要帳號。",
+  recover: "沒有 email 可以寄，救援碼是忘記密碼時唯一的後路。重設後所有裝置都會被登出，並拿到一組新的救援碼。",
+};
+
 function accountBlock() {
   if (signedIn()) {
     return `<div class="set-block">
@@ -923,19 +947,27 @@ function accountBlock() {
       <p id="acct-msg" class="muted"></p>
     </div>`;
   }
+  const isRecover = acctMode === "recover";
+  const fresh = isRecover || acctMode === "register";
   return `<div class="set-block">
     <h3>帳號<span class="tag">選用</span></h3>
-    <p>現在的進度只存在這台裝置上。要在手機與電腦之間同步，才需要帳號。</p>
+    <div class="acct-tabs">${ACCT_MODES.map(([k, label]) =>
+      `<button class="btn btn-sm acct-tab${k === acctMode ? " is-on" : ""}" data-acct-mode="${k}">${label}</button>`
+    ).join("")}</div>
+    <p>${ACCT_INTRO[acctMode]}</p>
     <div class="acct-form">
       <input class="input" id="acct-user" placeholder="帳號（3-32 字，英數字、_、-）"
              autocomplete="username" autocapitalize="off" spellcheck="false">
-      <input class="input" id="acct-pass" type="password" placeholder="密碼（至少 10 字）"
-             autocomplete="current-password">
-      ${CONFIG.turnstile_sitekey
+      ${isRecover
+        ? `<input class="input" id="acct-code" placeholder="救援碼（dl_ 開頭）"
+                  autocomplete="off" autocapitalize="off" spellcheck="false">` : ""}
+      <input class="input" id="acct-pass" type="password"
+             placeholder="${fresh ? "新密碼（至少 10 字）" : "密碼"}"
+             autocomplete="${fresh ? "new-password" : "current-password"}">
+      ${acctMode === "register" && CONFIG.turnstile_sitekey
         ? `<div class="cf-turnstile" data-sitekey="${esc(CONFIG.turnstile_sitekey)}"></div>` : ""}
       <div class="acct-row">
-        <button class="btn" id="acct-login">登入</button>
-        <button class="btn btn-secondary" id="acct-register">註冊新帳號</button>
+        <button class="btn btn-primary" id="acct-submit">${ACCT_SUBMIT[acctMode]}</button>
       </div>
     </div>
     <p id="acct-msg" class="muted"></p>
@@ -951,13 +983,16 @@ function acctMsg(text, bad = false) {
 
 // 沒有 email 就沒有寄信重設密碼。救援碼是唯一的後路，所以顯示它的時候
 // 要擋在流程中間，不能只是印一行讓人滑過去。
-function showRecoveryCode(code) {
+// note 走同一個框而不是另外呼叫 acctMsg()：兩者寫的是同一個 #acct-msg，
+// 後呼叫的那個會把救援碼整個蓋掉，而那是使用者唯一一次看到它的機會。
+function showRecoveryCode(code, note = "") {
   const box = $("#acct-msg");
   box.className = "recovery";
   box.innerHTML =
     `<b>救援碼</b><code>${esc(code)}</code>
      <span>忘記密碼時，這是唯一能拿回帳號的東西 —— 沒有 email 可以寄。
-     抄到手機以外的地方。它只會出現這一次。</span>`;
+     抄到手機以外的地方。它只會出現這一次。</span>` +
+    (note ? `<span>${esc(note)}</span>` : "");
 }
 
 async function doRegister() {
@@ -980,23 +1015,28 @@ async function doRegister() {
   }
 }
 
+// 這台裝置上已經有紀錄時，要問清楚是併入還是丟掉。登入與救援碼重設都會走到
+// 同一個岔路（兩者都是「這台裝置接上一個既有帳號」），所以只寫一次。
+async function askMerge() {
+  const local = await store.eventsCount();
+  if (!local) return { merge: true, local: 0 };
+  // 破壞性的那一邊必須是「確定」，不能是「取消」。瀏覽器抑制對話框時
+  // confirm() 會直接回 false 而且根本不顯示（Chrome 的「防止此頁面產生額外對話方塊」
+  // 在同一次設定頁操作中就按得到）—— 那時預設落在哪一邊，就決定了使用者的
+  // 全部本機紀錄會不會在沒被問過的情況下被清掉。
+  const replace = confirm(
+    `這台裝置上有 ${local} 筆作答紀錄。\n\n` +
+    `［確定］改用帳號上的紀錄 —— 這台裝置上的 ${local} 筆會被丟掉。\n` +
+    `［取消］把它們併入帳號 —— 兩邊的紀錄會合起來算。\n\n` +
+    `這個選擇無法復原。不確定就選取消。`
+  );
+  return { merge: !replace, local };
+}
+
 async function doLogin() {
   const username = $("#acct-user").value.trim();
   const password = $("#acct-pass").value;
-  const local = await store.eventsCount();
-  let merge = true;
-  if (local) {
-    // 破壞性的那一邊必須是「確定」，不能是「取消」。瀏覽器抑制對話框時
-    // confirm() 會直接回 false 而且根本不顯示（Chrome 的「防止此頁面產生額外對話方塊」
-    // 在同一次設定頁操作中就按得到）—— 那時預設落在哪一邊，就決定了使用者的
-    // 全部本機紀錄會不會在沒被問過的情況下被清掉。
-    merge = !confirm(
-      `這台裝置上有 ${local} 筆作答紀錄。\n\n` +
-      `［確定］改用帳號上的紀錄 —— 這台裝置上的 ${local} 筆會被丟掉。\n` +
-      `［取消］把它們併入帳號 —— 兩邊的紀錄會合起來算。\n\n` +
-      `這個選擇無法復原。不確定就選取消。`
-    );
-  }
+  const { merge, local } = await askMerge();
   try {
     const r = await api("/api/auth/login", {
       method: "POST", body: JSON.stringify({ username, password }),
@@ -1009,10 +1049,40 @@ async function doLogin() {
   }
 }
 
-async function errText(e, fallback) {
+// 忘記密碼的唯一出路。伺服器會換掉密碼與救援碼、撤掉全部 session，並直接發一個
+// 新 session 給這台裝置 —— 所以這裡跟登入一樣要處理本機紀錄的併入。
+async function doRecover() {
+  const username = $("#acct-user").value.trim();
+  const recovery_code = $("#acct-code").value.trim();
+  const new_password = $("#acct-pass").value;
+  const { merge, local } = await askMerge();
+  try {
+    const r = await api("/api/auth/recover", {
+      method: "POST", body: JSON.stringify({ username, recovery_code, new_password }),
+    });
+    await enterAccount(r.username, { merge, replaceLocal: !merge });
+    await renderSettings();
+    // 舊救援碼用掉就作廢了，新的一樣只出現這一次 —— 必須擋在流程中間，
+    // 不能只印一行讓人滑過去（比照註冊）。
+    showRecoveryCode(
+      r.recovery_code,
+      merge && local ? `密碼已重設，${local} 筆本機紀錄已併入帳號。` : "密碼已重設。"
+    );
+  } catch (e) {
+    acctMsg(await errText(e, "重設失敗", "帳號或救援碼不正確。"), true);
+  }
+}
+
+function submitAccount() {
+  if (acctMode === "login") return doLogin();
+  if (acctMode === "register") return doRegister();
+  return doRecover();
+}
+
+async function errText(e, fallback, unauthorized = "帳號或密碼不正確。") {
   const m = String(e.message || "");
   if (m.startsWith("429")) return "嘗試太頻繁，稍後再試。";
-  if (m.startsWith("401")) return "帳號或密碼不正確。";
+  if (m.startsWith("401")) return unauthorized;
   if (m.startsWith("409")) return "這個帳號已經有人用了。";
   if (m.startsWith("400")) return "帳號或密碼不符合規則（密碼至少 10 字，且不能是常見密碼）。";
   return fallback;
@@ -1134,14 +1204,40 @@ function bindAccountHandlers() {
     });
     return;
   }
-  $("#acct-login").addEventListener("click", doLogin);
-  $("#acct-register").addEventListener("click", doRegister);
-  if (CONFIG.turnstile_sitekey && !window.turnstile) {
-    const sc = document.createElement("script");
-    sc.src = "https://challenges.cloudflare.com/turnstile/v0/api.js";
-    sc.async = true;
-    document.head.appendChild(sc);
+  $("#set-body").querySelectorAll("[data-acct-mode]").forEach((b) =>
+    b.addEventListener("click", () => {
+      acctMode = b.dataset.acctMode;
+      renderSettings();
+    })
+  );
+  $("#acct-submit").addEventListener("click", submitAccount);
+  // 打完密碼按 Enter 原本什麼都不會發生（沒有 <form>，所以沒有隱含送出）。
+  $("#set-body").querySelectorAll(".acct-form input").forEach((i) =>
+    i.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); submitAccount(); }
+    })
+  );
+  mountTurnstile();
+}
+
+// Turnstile 的 widget 必須在每次重繪後重新掛上。api.js 只會自動 render
+// 「腳本載入當下就存在」的 .cf-turnstile —— 而 renderSettings() 每次都會把
+// 那個 div 換成新的（改 preset、按暫停、切換帳號分頁都會觸發）。
+// 原本只在第一次載入腳本、之後不再 render，於是重繪過就拿不到 token，
+// 註冊一律回 400「人機驗證未通過」，而且看不出為什麼。
+function mountTurnstile() {
+  const el = document.querySelector(".cf-turnstile");
+  if (!el || !CONFIG.turnstile_sitekey) return;
+  if (window.turnstile) {
+    window.turnstile.render(el, { sitekey: CONFIG.turnstile_sitekey });
+    return;
   }
+  if (document.getElementById("turnstile-js")) return;  // 載入中，onload 會自己 render
+  const sc = document.createElement("script");
+  sc.id = "turnstile-js";
+  sc.src = "https://challenges.cloudflare.com/turnstile/v0/api.js";
+  sc.async = true;
+  document.head.appendChild(sc);
 }
 
 async function setSetting(patch) {

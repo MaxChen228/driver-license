@@ -698,6 +698,13 @@ main {
    invalid-at-computed-value-time，整個 shorthand 會退成 unset：邊框直接消失、
    顏色掉回 inherit，而且不會有任何錯誤訊息。第一版寫了 --line / --muted / --accent
    這三個不存在的名字，救援碼那個「刻意要擋住流程」的框就完全沒有框。 */
+/* 帳號區塊的三個模式（登入／註冊／用救援碼重設）。零圓角的系統裡分頁不做成
+   膠囊，用 2px 底線標示選中的那個 —— 跟 .sec 的強分隔線是同一個語彙。 */
+.acct-tabs { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-bottom: var(--space-3); }
+.acct-tab { border-bottom: var(--rule-strong) solid transparent; }
+.acct-tab:hover { background: var(--tint-1); }
+.acct-tab.is-on { border-bottom-color: var(--color-accent); color: var(--color-accent); }
+
 .acct-form { display: flex; flex-direction: column; gap: var(--space-3); margin-top: var(--space-3); }
 .acct-row { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-3); }
 .danger { color: var(--color-accent); }
