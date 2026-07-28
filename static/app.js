@@ -78,6 +78,9 @@ async function boot() {
 
   $("#boot").hidden = true;
   paintNet();
+  // 第一筆歷史要帶 state，否則從首頁按返回時 popstate 的 e.state 是 null，
+  // 分不出「回到 app 的第一頁」與「離開 app」。
+  history.replaceState({ view: "home" }, "");
   renderHome();
 }
 
@@ -361,7 +364,36 @@ function show(view) {
     else b.removeAttribute("aria-current");
   });
   window.scrollTo(0, 0);
+  // 每次換頁推一筆歷史。沒有這個的話，Android 的硬體返回鍵與 iOS 的邊緣滑回
+  // 會直接離開 app（standalone 模式下就是關掉它），而不是回到上一頁 ——
+  // 這是 PWA 最常見的體感缺陷，而且使用者只會覺得「這個 app 怪怪的」。
+  // 網址不變（單頁 app 沒有路由），只是讓返回有東西可退。
+  if (!popping && (!history.state || history.state.view !== view)) {
+    history.pushState({ view }, "");
+  }
 }
+
+// popstate 期間不能再 push，否則每按一次返回就補回一筆，永遠退不出去。
+let popping = false;
+
+function renderView(view) {
+  if (view === "browse") return renderBrowse();
+  if (view === "stats") return renderStats();
+  if (view === "settings") return renderSettings();
+  // 作答中途離開再返回：S 還在就回到原本那張卡；不在就只能回首頁
+  if (view === "session" && S) return show("session");
+  return renderHome();
+}
+
+window.addEventListener("popstate", async (e) => {
+  const view = (e.state && e.state.view) || "home";
+  popping = true;
+  try {
+    await renderView(view);
+  } finally {
+    popping = false;
+  }
+});
 
 // ── 作答 ──────────────────────────────────────────────
 // 一輪的題數。0 = 不分節（整副佇列一次做完，也就是原本的行為）。
@@ -1064,6 +1096,7 @@ async function leaveAccount() {
   await store.kvPut("config", config);
   MODE = "local";
   ME = null;
+  acctPanel = null;   // 不要把展開中的「刪除帳號」面板留給下一個登入的人
   SNAP = adopt(emptySnapshot());
   await persist();
 }
@@ -1078,6 +1111,12 @@ async function leaveAccount() {
 //      入口 —— 註冊時告訴使用者「救援碼是唯一能拿回帳號的東西」，然後不給那條路。
 //      忘記密碼在這個 app 等於帳號永久失聯（沒有 email 可以寄）。
 let acctMode = "login";
+// 已登入時展開哪一個面板：null / "password" / "delete"。
+// 原本這兩件事都走 prompt()：密碼會以明文顯示在對話框裡、密碼管理器完全不參與
+// （既不能自動填、也不會提議更新），而且 prompt/confirm 是可以被瀏覽器抑制的
+// （Chrome 的「防止此頁面產生額外對話方塊」在同一次設定頁操作中就按得到）——
+// 那時 prompt() 直接回 null，使用者按了按鈕卻什麼都沒發生，也沒有任何訊息。
+let acctPanel = null;
 
 const ACCT_MODES = [["login", "登入"], ["register", "註冊"], ["recover", "用救援碼重設"]];
 const ACCT_SUBMIT = { login: "登入", register: "建立帳號", recover: "重設密碼" };
@@ -1089,14 +1128,40 @@ const ACCT_INTRO = {
 
 function accountBlock() {
   if (signedIn()) {
+    const who = esc(ME ? ME.username : "");
+    // 密碼欄位需要一個同表單的 username 才能讓密碼管理器認出「這是誰的密碼」
+    // 並提議更新。唯讀、不可 tab、對 AT 隱藏。
+    const whoField = `<input class="sr-only" type="text" value="${who}"
+      autocomplete="username" readonly tabindex="-1" aria-hidden="true">`;
+    const panel = {
+      password: `<div class="acct-form">${whoField}
+        <input class="input" type="password" id="pw-current" placeholder="目前的密碼"
+               autocomplete="current-password">
+        <input class="input" type="password" id="pw-new" placeholder="新密碼（至少 10 字）"
+               autocomplete="new-password">
+        <p class="muted">改完會登出其他所有裝置，並產生一組新的救援碼。</p>
+        <div class="acct-row">
+          <button class="btn btn-primary" id="pw-save">更新密碼</button>
+          <button class="btn btn-secondary" id="acct-cancel">取消</button>
+        </div></div>`,
+      delete: `<div class="acct-form">${whoField}
+        <p class="danger">刪除會連同伺服器上的所有進度一起消失，無法復原。</p>
+        <input class="input" type="password" id="del-pw" placeholder="輸入密碼確認"
+               autocomplete="current-password">
+        <div class="acct-row">
+          <button class="btn btn-danger" id="del-go">確定刪除帳號</button>
+          <button class="btn btn-secondary" id="acct-cancel">取消</button>
+        </div></div>`,
+    }[acctPanel] || "";
     return `<div class="set-block">
       <h3>帳號</h3>
-      <p>以 <b>${esc(ME ? ME.username : "")}</b> 登入中，進度會同步到這個帳號。</p>
+      <p>以 <b>${who}</b> 登入中，進度會同步到這個帳號。</p>
       <div class="acct-row">
         <button class="btn btn-secondary" id="acct-logout">登出這台裝置</button>
         <button class="btn btn-secondary" id="acct-chpw">更改密碼</button>
         <button class="btn btn-danger" id="acct-delete">刪除帳號</button>
       </div>
+      ${panel}
       <p id="acct-msg" class="muted"></p>
     </div>`;
   }
@@ -1125,6 +1190,19 @@ function accountBlock() {
     </div>
     <p id="acct-msg" class="muted"></p>
   </div>`;
+}
+
+// 這些面板都沒有包 <form>（表單的隱含送出會導覽掉整頁），所以按 Enter 不會有
+// 任何事發生 —— 打完密碼按 Enter 是本能動作，得自己補。
+function onEnter(selectors, fn) {
+  selectors.forEach((s) => {
+    const el = $(s);
+    if (el) {
+      el.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); fn(); }
+      });
+    }
+  });
 }
 
 function acctMsg(text, bad = false) {
@@ -1327,34 +1405,50 @@ function bindAccountHandlers() {
       await renderSettings();
       acctMsg("已登出，這台裝置回到未登入狀態。");
     });
-    $("#acct-chpw").addEventListener("click", async () => {
-      const current = prompt("目前的密碼：");
-      if (!current) return;
-      const next = prompt("新密碼（至少 10 字）：");
-      if (!next) return;
-      try {
-        const r = await api("/api/auth/password", {
-          method: "POST",
-          body: JSON.stringify({ current_password: current, new_password: next }),
-        });
-        await renderSettings();
-        showRecoveryCode(r.recovery_code);
-      } catch (e) {
-        acctMsg(await errText(e, "改密碼失敗"), true);
-      }
-    });
-    $("#acct-delete").addEventListener("click", async () => {
-      const pw = prompt("刪除帳號會連同伺服器上的所有進度一起消失，無法復原。\n輸入密碼確認：");
-      if (!pw) return;
-      try {
-        await api("/api/account", { method: "DELETE", body: JSON.stringify({ password: pw }) });
-        await leaveAccount();
-        await renderSettings();
-        acctMsg("帳號已刪除。");
-      } catch (e) {
-        acctMsg(await errText(e, "刪除失敗"), true);
-      }
-    });
+    const openPanel = (name) => { acctPanel = name; renderSettings(); };
+    $("#acct-chpw").addEventListener("click", () => openPanel("password"));
+    $("#acct-delete").addEventListener("click", () => openPanel("delete"));
+    const cancel = $("#acct-cancel");
+    if (cancel) cancel.addEventListener("click", () => openPanel(null));
+
+    if (acctPanel === "password") {
+      const save = async () => {
+        const current_password = $("#pw-current").value;
+        const new_password = $("#pw-new").value;
+        if (!current_password || !new_password) return acctMsg("兩個欄位都要填。", true);
+        try {
+          const r = await api("/api/auth/password", {
+            method: "POST", body: JSON.stringify({ current_password, new_password }),
+          });
+          acctPanel = null;
+          await renderSettings();
+          // 改密碼會一併換掉救援碼，新的一樣只出現這一次 —— 必須在重繪之後
+          showRecoveryCode(r.recovery_code, "密碼已更新，其他裝置都已登出。");
+        } catch (e) {
+          acctMsg(await errText(e, "改密碼失敗", "目前的密碼不正確。"), true);
+        }
+      };
+      $("#pw-save").addEventListener("click", save);
+      onEnter(["#pw-current", "#pw-new"], save);
+    }
+
+    if (acctPanel === "delete") {
+      const go = async () => {
+        const password = $("#del-pw").value;
+        if (!password) return acctMsg("要輸入密碼才能刪除。", true);
+        try {
+          await api("/api/account", { method: "DELETE", body: JSON.stringify({ password }) });
+          acctPanel = null;
+          await leaveAccount();
+          await renderSettings();
+          acctMsg("帳號已刪除。");
+        } catch (e) {
+          acctMsg(await errText(e, "刪除失敗", "密碼不正確。"), true);
+        }
+      };
+      $("#del-go").addEventListener("click", go);
+      onEnter(["#del-pw"], go);
+    }
     return;
   }
   $("#set-body").querySelectorAll("[data-acct-mode]").forEach((b) =>
@@ -1498,6 +1592,9 @@ document.querySelectorAll("[data-nav]").forEach((b) =>
     else if (v === "settings") renderSettings();
   })
 );
-$("#btn-back").addEventListener("click", renderHome);
+// 走 history.back() 而不是直接 renderHome()：作答可能是從首頁、統計的「最常
+// 答錯的分類」或題庫頁進來的，「返回」該回到它來的地方。也順便不讓歷史一直長。
+// 作答一定是從別的頁面進來的，所以上一筆必然存在。
+$("#btn-back").addEventListener("click", () => history.back());
 
 boot();
