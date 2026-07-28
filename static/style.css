@@ -581,6 +581,16 @@ main {
 .done .tick { width: 44px; height: 44px; stroke-width: 2.5; margin-bottom: var(--space-4); }
 .done h2 { font-size: clamp(30px, 8vw, 46px); margin: 0 0 var(--space-2); line-height: 1.15; }
 .done p { margin: 0 0 var(--space-6); opacity: .85; max-width: 34ch; }
+/* 本輪成績。數字給到 display 級 —— 這是使用者做完一輪唯一想看的東西，
+   而海報式陳述本來就是這個區塊的語彙。 */
+.done-score { margin-bottom: var(--space-3) !important; opacity: 1 !important; }
+.done-score b {
+  display: block; font-family: var(--font-heading); font-weight: var(--font-heading-weight);
+  font-size: clamp(34px, 10vw, 52px); line-height: 1.05;
+  letter-spacing: -0.02em; font-variant-numeric: tabular-nums;
+}
+.done-score span { display: block; margin-top: var(--space-1); font-size: 14px; opacity: .85; }
+.done-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
 .done .btn {
   background: var(--plate-fg); color: var(--color-accent);
   border-color: var(--plate-fg);

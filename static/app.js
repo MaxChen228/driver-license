@@ -58,6 +58,8 @@ async function boot() {
     return bootFail();
   }
 
+  const round = await store.kvGet("round_size");
+  if (typeof round === "number") ROUND = round;
   MODE = (await store.kvGet("mode")) || "local";
   if (MODE === "account") ME = { username: (await store.kvGet("username")) || "" };
   SNAP = adopt((await store.kvGet("snapshot")) || emptySnapshot());
@@ -362,10 +364,24 @@ function show(view) {
 }
 
 // ── 作答 ──────────────────────────────────────────────
+// 一輪的題數。0 = 不分節（整副佇列一次做完，也就是原本的行為）。
+// 為什麼需要它：「學新題」按下去是 1090 題的佇列，進度條一題只前進 0.09%，
+// 視覺上永遠不動，而「完成」畫面實質上到不了 —— 那個 1/1090 只有勸退效果。
+// 這不是每日上限（README 的「刻意沒有每日上限」仍然成立）：做完一輪可以立刻
+// 再來一輪，只是中間給一個結算與一個決定要不要繼續的點。
+// 存在裝置本機、不同步：這是顯示偏好，不是學習模型的一部分，伺服器不該有它。
+let ROUND = 20;
+const ROUND_CHOICES = [10, 20, 30, 50, 0];
+
 function startSession(deck, kind, category) {
   const ids = buildQueue(deck, kind, category);
   if (!ids.length) return renderHome();
-  S = { ids, i: 0, deck, answered: false, cardId: null, t0: 0 };
+  S = {
+    ids: ROUND > 0 ? ids.slice(0, ROUND) : ids,
+    i: 0, deck, kind, category,
+    answered: false, cardId: null, t0: 0,
+    right: 0, guessed: 0,
+  };
   show("session");
   loadCard();
 }
@@ -427,6 +443,7 @@ async function submit(chosen, guessed = false) {
 
   const q = question(S.cardId);
   const correct = chosen === q.answer;
+  if (correct) S.right += 1;   // 本輪結算用
   const remembered = correct && !guessed;
   const before = SNAP.states.get(q.id);
   const now = refNow();
@@ -568,6 +585,9 @@ $("#btn-guessed").addEventListener("click", async () => {
       return;
     }
   }
+  // 本輪結算：按了「我是猜的」就不算真的會，從答對數扣回來另外記
+  S.guessed += 1;
+  if (S.right > 0) S.right -= 1;
   $("#btn-guessed").hidden = true;
 });
 
@@ -598,8 +618,47 @@ function flash(btn, msg) {
 $("#btn-next").addEventListener("click", next);
 function next() {
   S.i += 1;
-  if (S.i >= S.ids.length) { show("done"); S = null; return; }
+  if (S.i >= S.ids.length) return finishRound();
   loadCard();
+}
+
+function finishRound() {
+  // 題庫頁點單一題進來的那條路沒有 kind，不是「一輪」，也沒有結算可言。
+  if (!S.kind) { S = null; return renderHome(); }
+  const r = {
+    deck: S.deck, kind: S.kind, category: S.category,
+    total: S.ids.length, right: S.right, guessed: S.guessed,
+  };
+  S = null;
+  renderDone(r);
+}
+
+function renderDone(r) {
+  // 剩幾題要重新算，不能拿原本佇列的尾巴 —— 剛剛答過的那些已經不再到期／未學，
+  // 而且答錯的可能又排回來了。重建一次才是當下的事實。
+  const remaining = buildQueue(r.deck, r.kind, r.category).length;
+  const pct = Math.round((r.right / r.total) * 100);
+  $("#view-done").innerHTML = `
+    <div class="done">
+      ${ico("check", "ico tick")}
+      <h2>本輪完成</h2>
+      <p class="done-score"><b>${r.right} / ${r.total}</b>
+        <span>答對 ${pct}%${r.guessed ? `　·　其中 ${r.guessed} 題按了「我是猜的」` : ""}</span></p>
+      <p>${remaining
+        ? `這副牌還剩 ${remaining} 題。`
+        : "這副牌目前沒有到期或未學的題目了。"}</p>
+      <div class="done-actions">
+        ${remaining ? `<button class="btn" id="done-again">再來一輪${ico("right", "ico btn-trail")}</button>` : ""}
+        <button class="btn" id="done-home">回首頁${ico("right", "ico btn-trail")}</button>
+      </div>
+    </div>`;
+  // 這個畫面是動態產生的，接不到檔尾那個一次性的 [data-nav] 綁定
+  if (remaining) {
+    $("#done-again").addEventListener("click", () => startSession(r.deck, r.kind, r.category));
+  }
+  $("#done-home").addEventListener("click", renderHome);
+  show("done");
+  announce(`本輪完成，答對 ${r.right} 題，共 ${r.total} 題。`);
 }
 
 // 筆記：離開輸入框才存，不要每個字打一次；離線時排進 notes_dirty 等補送
@@ -689,7 +748,9 @@ function refreshBrowse() {
   }).join("");
   $("#br-list").querySelectorAll(".row").forEach((b) =>
     b.addEventListener("click", () => {
-      S = { ids: [b.dataset.id], i: 0, deck: $("#br-deck").value };
+      // kind 為 null＝這不是「一輪」，做完直接回首頁而不是給結算（見 finishRound）
+      S = { ids: [b.dataset.id], i: 0, deck: $("#br-deck").value, kind: null,
+            right: 0, guessed: 0 };
       show("session"); loadCard();
     })
   );
@@ -833,6 +894,14 @@ async function renderSettings() {
       ${off ? `<p class="muted set-hint">離線時無法變更 —— 登入後這是帳號設定，由伺服器裁決。</p>` : ""}
     </div>
     <div class="set-block">
+      <h3>每輪題數</h3>
+      <p>做完一輪會給結算，再決定要不要繼續 —— 不是每日上限，想做幾輪都可以。
+      1090 題的佇列裡進度條一題只走 0.09%，那個數字只會讓人放棄。
+      這是這台裝置的顯示偏好，不會同步到帳號。</p>
+      <select id="set-round" class="input">${ROUND_CHOICES.map((n) =>
+        `<option value="${n}" ${n === ROUND ? "selected" : ""}>${n ? `${n} 題` : "不分節（整副做完）"}</option>`).join("")}</select>
+    </div>
+    <div class="set-block">
       <h3>凍結時鐘</h3>
       <p>暫停期間到期時間不再推進，回來時不會有一座待複習山。</p>
       <div class="switch">
@@ -869,6 +938,10 @@ async function renderSettings() {
   $("#set-cache").textContent = await cacheReport();
   // 設定在兩種模式都能改。匿名時就是本機的事；登入時伺服器是權威，
   // 改完直接採用它回傳的狀態，不要自己猜它會怎麼算（例如 paused_at）。
+  $("#set-round").addEventListener("change", async (e) => {
+    ROUND = Number(e.target.value);
+    await store.kvPut("round_size", ROUND);
+  });
   $("#set-preset").addEventListener("change", (e) => setSetting({ preset: e.target.value }));
   $("#set-pause").addEventListener("change", (e) => setSetting({ paused: e.target.checked }));
   bindAccountHandlers();
