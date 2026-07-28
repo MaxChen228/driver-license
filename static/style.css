@@ -667,6 +667,9 @@ main {
 .legend .dot { display: block; }
 .dot.due { background: var(--color-accent); border-color: var(--color-accent); }
 .dot.reviewed { background: var(--color-text); border-color: var(--color-text); }
+/* 統計圖的圖例。跟選項的正解／誤選同一組語彙：實心的墨＝對，accent＝錯。 */
+.dot.ok { background: var(--color-text); border-color: var(--color-text); }
+.dot.bad { background: var(--color-accent); border-color: var(--color-accent); }
 
 /* ── stats ──────────────────────────────────────────────────────────── */
 .tiles {
@@ -687,9 +690,20 @@ main {
 }
 
 .chart { border-bottom: var(--rule-strong) solid var(--color-divider); }
-.bars { display: flex; align-items: flex-end; gap: 3px; height: 120px; }
-.bars div { flex: 1; background: var(--color-accent); min-height: 2px; }
-.bars div.empty { background: var(--color-rule); }
+/* 每一欄是「數值標籤 + 長條」，長條靠底對齊。數值印出來而不是塞進 title：
+   觸控裝置沒有 hover，title 在主要平台上等於不存在。 */
+.bars { display: flex; align-items: stretch; gap: 3px; height: 120px; }
+.bars .col { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: flex-end; gap: 2px; }
+.bars .col .v {
+  flex: none; height: 12px; line-height: 12px; text-align: center;
+  font-size: 10px; font-variant-numeric: tabular-nums; color: var(--color-muted);
+}
+/* column-reverse：DOM 先寫答對再寫答錯，反過來排才會是「答對在下、答錯在上」 */
+.bars .bar { flex: none; display: flex; flex-direction: column-reverse; }
+.bars .bar.empty { background: var(--color-rule); }
+.bars .seg { display: block; }
+.bars .seg.one, .bars .seg.bad { background: var(--color-accent); }
+.bars .seg.ok { background: var(--color-text); }
 .barlabels { display: flex; gap: 3px; margin-top: var(--space-2); font-size: 10px;
              color: var(--color-muted); font-variant-numeric: tabular-nums; }
 .barlabels span { flex: 1; text-align: center; min-width: 0; }

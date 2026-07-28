@@ -911,7 +911,10 @@ async function renderStats() {
   const local = await localStats(deck);
   const forecast = s ? s.forecast_14d : local.forecast;
   const worst = s ? s.worst_categories : local.worst;
+  const activity = activityWindow(s ? s.activity : local.activity);
   const max = Math.max(1, ...forecast.map((f) => f.count));
+  const actMax = Math.max(1, ...activity.map((a) => a.count));
+  const actTotal = activity.reduce((n, a) => n + a.count, 0);
 
   $("#st-body").innerHTML = `
     <div class="sec">概況${s ? "" : `<span class="sec-note">${signedIn() ? "離線 · " : ""}本機資料</span>`}</div>
@@ -920,13 +923,19 @@ async function renderStats() {
       <div class="tile"><b>${accuracyText(s, local)}</b><span>正確率</span></div>
       <div class="tile"><b>${s ? s.streak_days : local.streak}</b><span>連續天數</span></div>
     </div>
+
+    <div class="sec">最近 14 天做了多少<span class="sec-note">共 ${actTotal} 題</span></div>
+    <div class="chart"><div class="bars">${barChart(activity, actMax, true)}</div></div>
+    ${dayLabels(activity, true)}
+    <p class="legend">
+      <span><i class="dot ok"></i>答對</span>
+      <span><i class="dot bad"></i>答錯</span>
+    </p>
+
     <div class="sec">未來 14 天到期量<span class="sec-note">尖峰 ${max} 題</span></div>
-    <div class="chart">
-      <div class="bars">${forecast.map((f) =>
-        `<div class="${f.count ? "" : "empty"}" data-h="${Math.max((f.count / max) * 100, 1.5)}" title="${f.day}：${f.count} 題"></div>`).join("")}</div>
-    </div>
-    <div class="barlabels">${forecast.map((f, i) =>
-      `<span>${i % 2 ? "" : f.day.slice(8)}</span>`).join("")}</div>
+    <div class="chart"><div class="bars">${barChart(forecast, max, false)}</div></div>
+    ${dayLabels(forecast)}
+
     <div class="sec">最常答錯的分類<span class="sec-note">點一列直接複習</span></div>
     ${worst.length
       ? `<div class="rows">${worst.map((c) => `<button class="row" data-cat="${esc(c.category)}">
@@ -938,15 +947,78 @@ async function renderStats() {
   // 高度用 JS 設，不寫成 style="" 內聯屬性：CSP 的 style-src 不含 'unsafe-inline'，
   // style-src-attr 會 fallback 到它，內聯屬性一律被擋 —— 長條圖會整排變成高度 0，
   // 而且沒有錯誤訊息，只是圖表變成一條線。CSSOM 賦值不受 CSP 管。
-  $("#st-body").querySelectorAll("[data-h]").forEach((b) => {
-    b.style.height = `${b.dataset.h}%`;
-  });
-
+  //
   // 統計不該只能看 —— 點分類直接開一輪那個分類的複習
   $("#st-body").querySelectorAll("[data-cat]").forEach((b) =>
     b.addEventListener("click", () => startSession(deck, "all", b.dataset.cat))
   );
   show("stats");
+
+  // 長條用像素而不是百分比：每一欄上方多了一行數值標籤，百分比是相對整欄算的，
+  // 100% 的那根會把標籤擠出容器。扣掉標籤高度之後用像素才對得準。
+  //
+  // 必須在 show() 之後 —— 在那之前 #view-stats 還是 hidden，clientHeight 是 0，
+  // 每根長條都會算成 2px 的地板值，而且不會有任何錯誤，圖表只是變成一條線。
+  // （原本整份用百分比所以沒踩到：百分比是版面計算時才解析的，設定的時機不重要。）
+  $("#st-body").querySelectorAll(".bars").forEach((box) => {
+    const avail = box.clientHeight - 14;
+    box.querySelectorAll(".bar").forEach((b) => {
+      b.style.height = `${Math.max(Math.round((Number(b.dataset.h) / 100) * avail), 2)}px`;
+    });
+  });
+  $("#st-body").querySelectorAll(".seg").forEach((s2) => {
+    s2.style.height = `${s2.dataset.h}%`;
+  });
+}
+
+// 長條圖。每根長條的數值原本只放在 title 屬性裡 —— 觸控裝置沒有 hover，
+// 也就是這個 app 的主要平台上完全看不到。改成把數字印在長條上方。
+// split=true 時把長條拆成兩段：實心的墨是答對、accent 是答錯 —— 跟選項的
+// 正解／誤選用的是同一組語彙，看一眼就知道哪一天做得不好。
+function barChart(rows, max, split) {
+  return rows.map((r) => {
+    const h = r.count ? (r.count / max) * 100 : 0;
+    const okPct = r.count ? (r.correct / r.count) * 100 : 0;
+    const segs = !r.count
+      ? ""
+      : split
+        ? `<i class="seg ok" data-h="${okPct}"></i><i class="seg bad" data-h="${100 - okPct}"></i>`
+        : `<i class="seg one" data-h="100"></i>`;
+    return `<div class="col">
+      <span class="v">${r.count || ""}</span>
+      <div class="bar${r.count ? "" : " empty"}" data-h="${h}">${segs}</div>
+    </div>`;
+  }).join("");
+}
+
+// 日期標籤每隔一格印一個（14 格全印在手機上會疊在一起）。
+// fromEnd 決定從哪一端開始隔：兩張圖的「今天」在不同邊 —— 作答量是往回看
+// （今天在最右），到期預測是往前看（今天在最左）。從錯的那端隔的話，今天
+// 那一格剛好落在偶數／奇數的另一邊而沒有標籤，而那是最需要標的一格。
+function dayLabels(rows, fromEnd = false) {
+  const last = rows.length - 1;
+  return `<div class="barlabels">${rows
+    .map((r, i) => {
+      const step = fromEnd ? last - i : i;
+      return `<span>${step % 2 ? "" : r.day.slice(8)}</span>`;
+    })
+    .join("")}</div>`;
+}
+
+// 把每日紀錄對齊成「最近 14 天」的固定長度序列，沒作答的日子補 0。
+// 伺服器的 activity 只含有紀錄的日子（而且最多 180 筆），直接畫會把空白日
+// 壓縮掉，看起來像天天都有做。日界用 UTC，跟 day_key 與 14 天預測同一套。
+function activityWindow(rows, days = 14) {
+  const byDay = new Map((rows || []).map((a) => [a.day, a]));
+  const now = refNow();
+  const day0 = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const out = [];
+  for (let i = days - 1; i >= 0; i -= 1) {
+    const day = new Date(day0 - i * 86400e3).toISOString().slice(0, 10);
+    const a = byDay.get(day);
+    out.push({ day, count: a ? a.count : 0, correct: a ? a.correct : 0 });
+  }
+  return out;
 }
 
 function accuracyText(server, local) {
@@ -983,11 +1055,19 @@ async function localStats(deck) {
   let total = 0;
   let ok = 0;
   const days = new Set();
+  const byDay = new Map();
   for (const ev of await store.eventsAll()) {
     const q = question(ev.card_id);
     if (!q || q.deck !== deck) continue;
     total += 1;
     if (ev.chosen === q.answer) ok += 1;
+    // 每日作答量與答對數。伺服器那邊叫 activity（day / count / correct），
+    // 欄位名對齊，前端才不需要為兩種模式各寫一份圖表。
+    const key = ev.reviewed_at.slice(0, 10);
+    const rec = byDay.get(key) || { day: key, count: 0, correct: 0 };
+    rec.count += 1;
+    if (ev.chosen === q.answer) rec.correct += 1;
+    byDay.set(key, rec);
     // 用 UTC 日期，跟伺服器的 day_key 同一套（app/main.py 拿 UTC 的 date()）。
     // 這裡若改用當地時區，同一個人登入前後看到的連續天數會不一樣 ——
     // 一致比「對」更重要，而伺服器那份是權威。
@@ -1002,6 +1082,7 @@ async function localStats(deck) {
     answered: total || answered,
     accuracy: total ? ok / total : null,
     streak,
+    activity: [...byDay.values()].sort((a, b) => a.day.localeCompare(b.day)),
     forecast: buckets.map((count, i) => ({
       day: new Date(day0 + i * 86400e3).toISOString().slice(0, 10), count,
     })),
