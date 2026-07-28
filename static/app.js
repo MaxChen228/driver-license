@@ -60,6 +60,7 @@ async function boot() {
 
   const round = await store.kvGet("round_size");
   if (typeof round === "number") ROUND = round;
+  FOCUS = (await store.kvGet("deck_focus")) || null;
   MODE = (await store.kvGet("mode")) || "local";
   if (MODE === "account") ME = { username: (await store.kvGet("username")) || "" };
   SNAP = adopt((await store.kvGet("snapshot")) || emptySnapshot());
@@ -311,9 +312,19 @@ function shuffled(a) {
 }
 
 // ── 首頁 ──────────────────────────────────────────────
+// 要考哪一種：null = 還沒選過、"car"／"moto" = 只顯示那一副、"both" = 兩副都顯示。
+// 原本首頁永遠並列汽車與機車，但一個人不會同時去考兩種 —— 每次進首頁都要掃
+// 兩組數字、按對其中一半的按鈕。存在裝置本機：這是顯示偏好，不是進度。
+let FOCUS = null;
+
 function renderHome() {
+  if (!FOCUS) return renderDeckChooser();
+  const decks = FOCUS === "both"
+    ? CONFIG.decks
+    : CONFIG.decks.filter((d) => d.deck === FOCUS);
+
   $("#view-home").innerHTML =
-    CONFIG.decks.map((d) => deckCard(d, counts(d.deck))).join("") +
+    decks.map((d) => deckCard(d, counts(d.deck))).join("") +
     (SNAP.paused
       ? `<p class="home-note tag tag-accent">${ico("pause", "ico ico-sm")}時鐘已凍結 —— 到期時間不會推進</p>`
       : "");
@@ -330,6 +341,32 @@ function deckCard(d, c) {
   const cats = d.categories
     .map((x) => `<option value="${esc(x.category)}">${esc(x.category)}（${x.count}）</option>`)
     .join("");
+
+  // accent 只給「現在真的能做的那件事」—— 這是這套系統自己的規則（見 style.css
+  // 的 .btn-primary:disabled）。原本無論如何都把紅色鋪在「複習到期」上，而全新
+  // 使用者的到期數是 0：首屏最醒目的東西是一顆按不下去的按鈕，真正的入口
+  // 「學新題」反而長得像次要動作。改成順序與 accent 都跟著實際可做的那顆走。
+  const actions = [
+    { kind: "due", icon: "play", label: "複習到期", count: c.due },
+    { kind: "unlearned", icon: "plus", label: "學新題", count: c.unlearned },
+    { kind: "all", icon: "layers", label: "全部", count: c.due + c.unlearned },
+  ];
+  if (!c.due) actions.unshift(actions.splice(1, 1)[0]);   // 沒有到期 → 學新題排最前
+  const primary = actions.find((a) => a.count > 0);
+  const buttons = actions.map((a) => {
+    const lead = primary && a.kind === primary.kind ? "btn-primary btn-lg" : "btn-secondary";
+    return `<button class="btn ${lead}" data-start="${a.kind}" data-deck="${d.deck}"
+      ${a.count ? "" : "disabled"}>${ico(a.icon, "ico ico-sm")}<span>${a.label}</span>
+      <span class="btn-count">${a.count}</span></button>`;
+  }).join("");
+
+  // 全新使用者看到的是「1090 / 0 / 0」與一排按鈕，沒有任何一句話說接下來會發生
+  // 什麼。這行只在還沒開始時出現，開始之後就消失。
+  const hint = !c.reviewed && !c.due
+    ? `<p class="muted deck-hint">還沒開始。先按「學新題」——
+       答過的題目會自動排進複習，答對的間隔拉長、答錯的縮短。</p>`
+    : "";
+
   return `
   <article class="deck">
     <h2>${esc(d.label)}</h2>
@@ -339,19 +376,39 @@ function deckCard(d, c) {
       <div class="metric${c.due ? " is-accent" : ""}"><b>${c.due}</b><span>待複習</span></div>
       <div class="metric"><b>${c.reviewed}</b><span>已複習</span></div>
     </div>
-    <div class="deck-actions">
-      <button class="btn btn-primary btn-lg" data-start="due" data-deck="${d.deck}" ${c.due ? "" : "disabled"}>
-        ${ico("play", "ico ico-sm")}<span>複習到期</span><span class="btn-count">${c.due}</span></button>
-      <button class="btn btn-secondary" data-start="unlearned" data-deck="${d.deck}" ${c.unlearned ? "" : "disabled"}>
-        ${ico("plus", "ico ico-sm")}<span>學新題</span><span class="btn-count">${c.unlearned}</span></button>
-      <button class="btn btn-secondary" data-start="all" data-deck="${d.deck}">
-        ${ico("layers", "ico ico-sm")}<span>全部</span><span class="btn-count">${c.due + c.unlearned}</span></button>
-    </div>
+    ${hint}
+    <div class="deck-actions">${buttons}</div>
     <div class="catrow">
       <label class="field-label" for="cat-${d.deck}">分類範圍</label>
       <select id="cat-${d.deck}" class="input"><option value="">全部分類</option>${cats}</select>
     </div>
   </article>`;
+}
+
+// 第一次開啟時先問要考哪一種。三個選項都是一次點擊，之後在設定頁隨時能改 ——
+// 不是那種「選錯就回不去」的引導，所以不需要確認，也不必解釋太多。
+function renderDeckChooser() {
+  // 包一層並跨滿欄：#view-home 在 ≥820px 是兩欄網格（給兩張 deck 卡用的），
+  // 不包的話標題、說明、按鈕會被拆進左右兩欄，說明文字飄到右邊去。
+  $("#view-home").innerHTML = `
+    <div class="chooser-wrap">
+      <div class="sec">你要考哪一種</div>
+      <p class="muted">只決定首頁顯示哪一副題庫，設定頁隨時可以改。</p>
+      <div class="chooser">
+        ${CONFIG.decks.map((d) => `<button class="btn btn-primary btn-lg btn-block" data-focus="${d.deck}">
+          <span>${esc(d.label)}</span><span class="btn-count">${d.total} 題</span></button>`).join("")}
+        <button class="btn btn-secondary btn-block" data-focus="both">
+          <span>兩種都要</span></button>
+      </div>
+    </div>`;
+  $("#view-home").querySelectorAll("[data-focus]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      FOCUS = b.dataset.focus;
+      await store.kvPut("deck_focus", FOCUS);
+      renderHome();
+    })
+  );
+  show("home");
 }
 
 function show(view) {
@@ -974,6 +1031,15 @@ async function renderSettings() {
       ${off ? `<p class="muted set-hint">離線時無法變更 —— 登入後這是帳號設定，由伺服器裁決。</p>` : ""}
     </div>
     <div class="set-block">
+      <h3>首頁顯示</h3>
+      <p>一個人通常只考一種。這只影響首頁與題庫／統計頁的預設題庫，兩副的進度都留著。</p>
+      <select id="set-focus" class="input">${
+        CONFIG.decks.map((d) =>
+          `<option value="${d.deck}" ${FOCUS === d.deck ? "selected" : ""}>只看${esc(d.label)}</option>`
+        ).join("")
+      }<option value="both" ${FOCUS === "both" ? "selected" : ""}>兩種都顯示</option></select>
+    </div>
+    <div class="set-block">
       <h3>每輪題數</h3>
       <p>做完一輪會給結算，再決定要不要繼續 —— 不是每日上限，想做幾輪都可以。
       1090 題的佇列裡進度條一題只走 0.09%，那個數字只會讓人放棄。
@@ -1018,6 +1084,10 @@ async function renderSettings() {
   $("#set-cache").textContent = await cacheReport();
   // 設定在兩種模式都能改。匿名時就是本機的事；登入時伺服器是權威，
   // 改完直接採用它回傳的狀態，不要自己猜它會怎麼算（例如 paused_at）。
+  $("#set-focus").addEventListener("change", async (e) => {
+    FOCUS = e.target.value;
+    await store.kvPut("deck_focus", FOCUS);
+  });
   $("#set-round").addEventListener("change", async (e) => {
     ROUND = Number(e.target.value);
     await store.kvPut("round_size", ROUND);
@@ -1558,6 +1628,8 @@ function registerSW() {
 function fillDeckSelect(sel) {
   if ($(sel).options.length) return;
   $(sel).innerHTML = CONFIG.decks.map((d) => `<option value="${d.deck}">${esc(d.label)}</option>`).join("");
+  // 預設跟著首頁的選擇走 —— 只考機車的人不該每次進題庫頁都先切一次
+  if (FOCUS && FOCUS !== "both") $(sel).value = FOCUS;
 }
 function esc(s) {
   return String(s ?? "").replace(/[&<>"]/g, (c) =>

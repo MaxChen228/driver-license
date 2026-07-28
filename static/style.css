@@ -415,6 +415,12 @@ main {
   .deck-actions .btn-primary { grid-column: 1 / -1; }
 }
 .catrow { margin-top: var(--space-3); }
+.deck-hint { margin-bottom: var(--space-4); max-width: 42ch; }
+/* 第一次開啟的車種選擇。不套 .deck-actions 的兩欄網格：那裡的規則會把
+   btn-primary 撐成滿版，而這裡有兩顆 primary，排出來會是兩條滿版加一顆半寬。 */
+.chooser-wrap { grid-column: 1 / -1; max-width: 34rem; }
+.chooser { display: grid; gap: var(--space-2); margin-top: var(--space-4); }
+.chooser .btn-count { margin-left: auto; font-variant-numeric: tabular-nums; opacity: .8; }
 
 /* ── session ────────────────────────────────────────────────────────── */
 #progress { height: var(--rule-strong); background: var(--color-rule); overflow: hidden; }
