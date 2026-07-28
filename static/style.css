@@ -373,28 +373,45 @@ main {
 .view > .sec:first-child { margin-top: 0; }
 
 /* ── home ───────────────────────────────────────────────────────────── */
+/* 首頁的組織原則：一份題庫 = 一個有邊界的區塊，區塊之間靠留白分開。
+   原本每張卡只在頭頂掛一條 2px 橫線 —— 那條線既不圍合任何東西，也不與
+   相鄰欄的線連成一氣（兩欄之間有 24px 空隙，線是斷的），四張卡就是四段
+   浮在標題上方的線段。線退場，改由邊框與底色說明「這一塊到哪裡為止」。
+   全頁只留一條 2px 橫線給頁尾的官方資源 —— 剩下唯一一條，意思就明確了。 */
 #view-home { display: grid; gap: var(--space-6); }
 @media (min-width: 820px) {
-  #view-home { grid-template-columns: 1fr 1fr; align-items: start; }
-  #view-home > .home-note { grid-column: 1 / -1; }
+  /* stretch 不是 start：同一列的兩張卡等高，底邊才會齊（.catrow 貼底） */
+  #view-home { grid-template-columns: 1fr 1fr; align-items: stretch; }
+  #view-home > .home-note,
+  #view-home > .home-intro,
+  #view-home > .official { grid-column: 1 / -1; }
+}
+.home-intro {
+  margin: 0; max-width: 58ch;
+  color: var(--color-muted);
 }
 
 .deck {
-  border-top: var(--rule-strong) solid var(--color-divider);
-  padding-top: var(--space-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-divider);
+  padding: var(--space-4);
+  display: flex; flex-direction: column;
 }
-.deck h2 { font-size: 26px; margin: 0 0 var(--space-1); }
-.deck .sub { margin: 0 0 var(--space-4); }
+.deck-head { margin-bottom: var(--space-4); }
+.deck h2 { font-size: 22px; margin: 0 0 var(--space-1); }
+.deck .sub { margin: 0; }
 
-/* 三個計數是一個模組化網格：等寬格子、格線可見 */
+/* 三個計數是一個模組化網格：等寬格子、格線可見。
+   不再自帶四邊外框 —— 卡片已經是一個框了，框裡再畫框只是多一圈噪音。
+   上下兩條 hairline 就夠把這一列與標題、按鈕分開。 */
 .metrics {
   display: grid; grid-template-columns: repeat(3, 1fr);
-  border: 1px solid var(--color-divider);
+  border-top: 1px solid var(--color-rule);
+  border-bottom: 1px solid var(--color-rule);
   margin-bottom: var(--space-4);
-  background: var(--color-surface);
 }
-.metric { padding: var(--space-3) var(--space-2); text-align: left; min-width: 0; }
-.metric + .metric { border-left: 1px solid var(--color-divider); }
+.metric { padding: var(--space-3) var(--space-2) var(--space-3) 0; text-align: left; min-width: 0; }
+.metric + .metric { border-left: 1px solid var(--color-rule); padding-left: var(--space-3); }
 .metric b {
   display: block; font-size: 28px; line-height: 1.05;
   font-family: var(--font-heading); font-weight: var(--font-heading-weight);
@@ -414,8 +431,8 @@ main {
   .deck-actions { grid-template-columns: 1fr 1fr; }
   .deck-actions .btn-primary { grid-column: 1 / -1; }
 }
-.catrow { margin-top: var(--space-3); }
-.deck-hint { margin-bottom: var(--space-4); max-width: 42ch; }
+/* auto 把分類範圍推到卡片底部：同一列兩張卡即使按鈕數不同，下緣仍然對齊 */
+.catrow { margin-top: auto; padding-top: var(--space-4); }
 /* 第一次開啟的車種選擇。不套 .deck-actions 的兩欄網格：那裡的規則會把
    btn-primary 撐成滿版，而這裡有兩顆 primary，排出來會是兩條滿版加一顆半寬。 */
 .chooser-wrap { grid-column: 1 / -1; max-width: 34rem; }

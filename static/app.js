@@ -347,8 +347,18 @@ function renderHome() {
     ? CONFIG.decks
     : CONFIG.decks.filter((d) => vehicleOf(d.deck) === FOCUS);
 
+  const stats = decks.map((d) => counts(d.deck));
+  // 「怎麼運作」講一次就夠。原本每張卡各印一份，四張卡就是同一段話印四次 ——
+  // 而且有的卡印、有的不印（已開始的那張不印），卡片高度因此不一，同一列左右
+  // 兩張的數字列與按鈕列全部錯開。說明升到整列的層級，卡片就只剩數字與動作。
+  const intro = stats.every((c) => !c.reviewed && !c.due)
+    ? `<p class="home-intro">還沒開始。先按「學新題」—— 答過的題目會自動排進複習，
+       答對的間隔拉長、答錯的縮短。</p>`
+    : "";
+
   $("#view-home").innerHTML =
-    decks.map((d) => deckCard(d, counts(d.deck))).join("") +
+    intro +
+    decks.map((d, i) => deckCard(d, stats[i])).join("") +
     (SNAP.paused
       ? `<p class="home-note tag tag-accent">${ico("pause", "ico ico-sm")}時鐘已凍結 —— 到期時間不會推進</p>`
       : "") +
@@ -385,23 +395,17 @@ function deckCard(d, c) {
       <span class="btn-count">${a.count}</span></button>`;
   }).join("");
 
-  // 全新使用者看到的是「1090 / 0 / 0」與一排按鈕，沒有任何一句話說接下來會發生
-  // 什麼。這行只在還沒開始時出現，開始之後就消失。
-  const hint = !c.reviewed && !c.due
-    ? `<p class="muted deck-hint">還沒開始。先按「學新題」——
-       答過的題目會自動排進複習，答對的間隔拉長、答錯的縮短。</p>`
-    : "";
-
   return `
   <article class="deck">
-    <h2>${esc(d.label)}</h2>
-    <p class="sub kicker">${esc(d.title)} · ${esc(d.version)} · 共 ${d.total} 題</p>
+    <header class="deck-head">
+      <h2>${esc(d.label)}</h2>
+      <p class="sub kicker">${esc(d.title)} · ${esc(d.version)} · 共 ${d.total} 題</p>
+    </header>
     <div class="metrics">
       <div class="metric"><b>${c.unlearned}</b><span>未學習</span></div>
       <div class="metric${c.due ? " is-accent" : ""}"><b>${c.due}</b><span>待複習</span></div>
       <div class="metric"><b>${c.reviewed}</b><span>已複習</span></div>
     </div>
-    ${hint}
     <div class="deck-actions">${buttons}</div>
     <div class="catrow">
       <label class="field-label" for="cat-${d.deck}">分類範圍</label>
