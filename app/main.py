@@ -46,6 +46,9 @@ app = FastAPI(
 
 DECK_DATA = load_decks()
 db.init()
+# 過期 session 只有在「該帳號自己再登入一次」時才會被清掉，所以註冊完就不再
+# 登入的帳號，那列會躺到永遠。啟動時掃一次，一句 DELETE。
+_purged = db.purge_expired_sessions()
 
 # 直接寫 stderr，不走 logging：import 期發出的 INFO 沒有任何 handler 接
 # （root 的 lastResort 門檻是 WARNING，uvicorn 的 LOGGING_CONFIG 也不碰 root），
@@ -54,7 +57,8 @@ db.init()
 print(
     f"driver-license: env={'prod' if IS_PROD else 'dev'}"
     f" docs={'off' if IS_PROD else '/api/docs'}"
-    f" turnstile={'on' if os.environ.get('DL_TURNSTILE_SECRET') else 'off'}",
+    f" turnstile={'on' if os.environ.get('DL_TURNSTILE_SECRET') else 'off'}"
+    f" purged_sessions={_purged}",
     file=sys.stderr, flush=True,
 )
 

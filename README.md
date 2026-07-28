@@ -125,6 +125,20 @@ cd ~/project/driver-license
 bash ops/deploy.sh
 ```
 
+### 備份與還原
+
+每日 11:20 `ops/backup.sh`（`com.driverlicense.backup`）：`sqlite3 .backup` 取一致快照 →
+`integrity_check` → 帳號數閘 → 本地留 14 份 + 上傳 S3。
+
+每月 1 號 11:40 `ops/restore-drill.sh --s3`（`com.driverlicense.drill`）：從 S3 抓最新那份
+真的還原、真的起一個 `:8007` 的實例、打 `/api/health`、對帳帳號數與事件數。
+全程不碰生產，不需要停機。**備份最貴的失敗模式是「一直在跑、也一直是綠的，
+直到要用的那天才發現還原不回來」** —— 所以驗的是異地那份（本地那份跟生產同一顆碟）。
+
+結果各留一行在 `~/Library/Logs/driver-license-backup.log` 與 `-drill.log`。
+
+### 換版
+
 `ops/deploy.sh` 依序做：前置檢查（服務在不在、工作區乾不乾淨）→ 備份 →
 `git pull && uv sync` → `pytest` → `kickstart` → 打 `/api/health` 確認程序活著、
 DB 開得起來、schema 遷到程式碼期待的版本。任何一步失敗就停下來並說明下一步。

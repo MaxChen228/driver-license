@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  每月一次的還原演練（felix）。
+
+  跑 ops/restore-drill.sh --s3：從 S3 抓最新那份備份 → 解壓 → integrity_check
+  → 用它起一個 :8007 的實例 → 打 /api/health → 對帳帳號數與事件數 → 拆掉。
+  全程不碰生產（DL_DATA_DIR 指到臨時目錄，服務在另一個埠），不需要停機。
+
+  為什麼要排程而不是「需要時再跑」：備份最貴的失敗模式是「一直在跑、也一直
+  是綠的，直到要用的那天才發現還原不回來」。那時候沒有第二次機會。
+  刻意用 --s3 而不是本地備份 —— 本地那份跟生產在同一顆碟上，機器整台掛掉時
+  能救命的是異地那份，所以要驗的也是那份。
+
+  每月 1 號 11:40（錯開 backup 的 11:20 與 kg 的 11:00）。
+  StartCalendarInterval 用本機時間，felix 是 Asia/Taipei。
+
+  部署：
+    cp deploy/com.driverlicense.drill.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.driverlicense.drill.plist
+  改 plist 要 bootout 再 bootstrap（kickstart 不重讀 plist）。
+  手動跑一次：launchctl kickstart -k gui/$(id -u)/com.driverlicense.drill
+
+  結果看 ~/Library/Logs/driver-license-drill.log（一次一行 OK/FAIL）。
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.driverlicense.drill</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/chenliangyu/project/driver-license/ops/restore-drill.sh</string>
+        <string>--s3</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/chenliangyu/project/driver-license</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>DL_DATA_DIR</key>
+        <string>/Users/chenliangyu/driver-license-data</string>
+        <key>DL_DRILL_LOG</key>
+        <string>/Users/chenliangyu/Library/Logs/driver-license-drill.log</string>
+    </dict>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Day</key>
+        <integer>1</integer>
+        <key>Hour</key>
+        <integer>11</integer>
+        <key>Minute</key>
+        <integer>40</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/chenliangyu/Library/Logs/driver-license-drill.launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/chenliangyu/Library/Logs/driver-license-drill.launchd.err.log</string>
+</dict>
+</plist>

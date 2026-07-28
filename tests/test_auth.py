@@ -413,3 +413,43 @@ def test_privacy_page_is_public_and_carries_no_inline_styles(anon_client):
     assert "style=" not in r.text
     assert "<script" not in r.text
     assert "email" not in r.text.lower() or "沒有 email" in r.text
+
+
+def test_startup_purges_expired_sessions_for_every_user(tmp_path):
+    """過期列不會自己消失 —— auth.purge_expired_sessions 只清正在登入的那個帳號，
+    掛在登入那條路上。註冊完就不再登入的帳號，那列會躺到永遠。"""
+    import importlib
+    from datetime import datetime, timedelta, timezone
+
+    from tests.conftest import data_dir_env
+
+    with data_dir_env(tmp_path):
+        import app.db
+
+        dbmod = importlib.reload(app.db)
+        dbmod.init()
+        now = datetime.now(timezone.utc)
+        with dbmod.session(write=True) as conn:
+            for uid, name in ((1, "alice"), (2, "bob")):
+                conn.execute(
+                    "INSERT INTO user(id, username, created_at) VALUES(?,?,?)",
+                    (uid, name, dbmod.iso(now)),
+                )
+            rows = [
+                ("expired-a", 1, now - timedelta(days=1)),
+                ("live-a", 1, now + timedelta(days=1)),
+                ("expired-b", 2, now - timedelta(seconds=1)),
+            ]
+            for token, uid, exp in rows:
+                conn.execute(
+                    "INSERT INTO session(token_sha256, user_id, created_at, expires_at)"
+                    " VALUES(?,?,?,?)",
+                    (token, uid, dbmod.iso(now), dbmod.iso(exp)),
+                )
+
+        assert dbmod.purge_expired_sessions() == 2
+        with dbmod.session() as conn:
+            left = [r["token_sha256"] for r in conn.execute("SELECT token_sha256 FROM session")]
+        assert left == ["live-a"]
+        # 冪等：再掃一次不該再刪到任何東西
+        assert dbmod.purge_expired_sessions() == 0

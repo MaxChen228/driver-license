@@ -323,6 +323,29 @@ def init(path: Path | None = None) -> None:
         conn.close()
 
 
+def purge_expired_sessions(path: Path | None = None) -> int:
+    """把所有帳號的過期 session 列清掉。回傳刪了幾列。
+
+    auth.purge_expired_sessions 只清「正在登入的那個帳號」，掛在登入那條路上。
+    問題是過期在 user_for_token 是「查到但判定無效」，列不會自己消失 ——
+    一個註冊完就不再登入的帳號，那列會躺在那裡直到有人再登入為止，也就是永遠。
+    量很小，但這正是「沒人掃就會慢慢爛」的那一類：放著只會在某天變成一張
+    沒有人知道為什麼這麼大的表。程序啟動時掃一次是最省事的時機。
+    """
+    conn = sqlite3.connect(path or db_path(), isolation_level=None)
+    try:
+        _configure(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute(
+            "DELETE FROM session WHERE expires_at<=?",
+            (iso(datetime.now(timezone.utc)),),
+        )
+        conn.execute("COMMIT")
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
 @contextmanager
 def session(write: bool = False):
     """一個請求一條連線，交易邊界明確。
