@@ -43,6 +43,72 @@ PRESETS: dict[str, ReviewSettings] = {
 }
 DEFAULT_PRESET = "relaxed"
 
+# 第三個選項：使用者自己調的倍率。它不在 PRESETS 裡，因為 PRESETS 是「名字 →
+# 固定數值」的表，而 custom 的數值會變 —— 這個差別是整段設計的關鍵：
+# review_event 存的是 preset 的**名字**，重算時再查表換回數值（見 db.rebuild_card
+# 的 docstring）。如果 custom 也只存名字，那麼使用者每調一次倍率，過去所有事件
+# 都會被用新數值重算一遍 —— 正是那份 docstring 花一整段在防的事。
+# 所以 custom 的事件必須把「當時那組數值」一起存下來（review_event.preset_params）。
+CUSTOM_PRESET = "custom"
+
+# 可調範圍。兩個邊界都不是美觀問題，是「排程還成不成立」的問題：
+#   答對倍率 ≤ 1 → 答對之後間隔不變或變短，卡永遠停在下限，佇列只會越長越大。
+#   答錯倍率 ≥ 1 → 答錯之後間隔沒縮短，這個排程就沒有在回應「你忘了」。
+# 上界純粹是防呆（×5 已經是「答對三次就排到上限」）。
+REMEMBERED_MULT_RANGE = (1.05, 5.0)
+FORGOT_MULT_RANGE = (0.1, 0.95)
+
+
+def custom_settings(base: ReviewSettings, remembered_mult: float, forgot_mult: float) -> ReviewSettings:
+    """在 base（切到 custom 當下那組 preset）上換掉兩個倍率，其餘沿用。
+
+    首次間隔與上下限刻意不開放調整：這一版只做使用者要的那兩個旋鈕。五個值
+    仍然一起存下來，日後要開放其他項不必再動一次 schema。
+    """
+    return ReviewSettings(
+        initial_hours=base.initial_hours,
+        remembered_mult=clamp_mult(remembered_mult, REMEMBERED_MULT_RANGE),
+        forgot_mult=clamp_mult(forgot_mult, FORGOT_MULT_RANGE),
+        min_hours=base.min_hours,
+        max_hours=base.max_hours,
+    )
+
+
+def clamp_mult(value: float, rng: tuple[float, float]) -> float:
+    lo, hi = rng
+    return round(min(hi, max(lo, float(value))), 2)
+
+
+def resolve(name: str, params: dict | None = None) -> ReviewSettings:
+    """名字（＋ custom 才有的那組數值）→ 實際參數。
+
+    params 只有在 name == custom 時才看；具名 preset 一律以表為準，免得舊事件
+    帶著一份與名字對不起來的數值，重算出來的東西誰也解釋不了。
+    """
+    if name != CUSTOM_PRESET:
+        return ReviewSettings.preset(name)
+    p = params or {}
+    base = PRESETS.get(str(p.get("base") or DEFAULT_PRESET), PRESETS[DEFAULT_PRESET])
+    return ReviewSettings(
+        initial_hours=float(p.get("initial_hours", base.initial_hours)),
+        remembered_mult=clamp_mult(p.get("remembered_mult", base.remembered_mult), REMEMBERED_MULT_RANGE),
+        forgot_mult=clamp_mult(p.get("forgot_mult", base.forgot_mult), FORGOT_MULT_RANGE),
+        min_hours=float(p.get("min_hours", base.min_hours)),
+        max_hours=float(p.get("max_hours", base.max_hours)),
+    )
+
+
+def as_params(cfg: ReviewSettings, base: str = DEFAULT_PRESET) -> dict:
+    """ReviewSettings → 可以存進 user_setting／review_event 的 dict。"""
+    return {
+        "base": base,
+        "initial_hours": cfg.initial_hours,
+        "remembered_mult": cfg.remembered_mult,
+        "forgot_mult": cfg.forgot_mult,
+        "min_hours": cfg.min_hours,
+        "max_hours": cfg.max_hours,
+    }
+
 
 def next_interval_hours(current_hours: float, remembered: bool, cfg: ReviewSettings) -> float:
     """kg VocabularyReviewPolicy.nextIntervalHours 的直譯。夾擠順序見模組 docstring。"""

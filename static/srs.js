@@ -27,10 +27,55 @@ const PRESETS = {
 };
 const DEFAULT_PRESET = "relaxed";
 
+// 第三個選項：使用者自己調的倍率。它不在 PRESETS 裡，因為 PRESETS 是「名字 →
+// 固定數值」的表，而 custom 的數值會變。事件裡存的是名字，重算時查表換回數值 ——
+// custom 因此必須把「當時那組數值」跟著事件一起存（app.js 的 ev.preset_params，
+// 伺服器端是 review_event.preset_params）。詳見 app/srs.py 的同一段註解。
+const CUSTOM_PRESET = "custom";
+
+// 可調範圍。答對倍率 ≤ 1 → 答對之後間隔不變或變短，卡永遠停在下限；
+// 答錯倍率 ≥ 1 → 答錯之後間隔沒縮短。兩者都會讓排程失去意義，所以是硬邊界。
+const REMEMBERED_MULT_RANGE = [1.05, 5.0];
+const FORGOT_MULT_RANGE = [0.1, 0.95];
+
+function clampMult(value, range) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return range[0];
+  return Math.round(Math.min(range[1], Math.max(range[0], n)) * 100) / 100;
+}
+
 function params(preset) {
   const cfg = PRESETS[preset];
   if (!cfg) throw new Error(`unknown preset: ${preset}`);
   return cfg;
+}
+
+// 名字（＋ custom 才有的那組數值）→ 實際參數。與 app/srs.py 的 resolve() 逐行對應。
+// 具名 preset 一律以表為準，就算帶了 custom 數值也不理 —— 名字與數值對不起來的
+// 事件不該有第二種解釋。
+function resolve(preset, custom) {
+  if (preset !== CUSTOM_PRESET) return params(preset);
+  const p = custom || {};
+  const base = PRESETS[p.base] || PRESETS[DEFAULT_PRESET];
+  return {
+    initial_hours: Number(p.initial_hours ?? base.initial_hours),
+    remembered_mult: clampMult(p.remembered_mult ?? base.remembered_mult, REMEMBERED_MULT_RANGE),
+    forgot_mult: clampMult(p.forgot_mult ?? base.forgot_mult, FORGOT_MULT_RANGE),
+    min_hours: Number(p.min_hours ?? base.min_hours),
+    max_hours: Number(p.max_hours ?? base.max_hours),
+  };
+}
+
+// ReviewSettings → 可以存進設定／事件的物件（與 app/srs.py 的 as_params 對應）
+function asParams(cfg, base = DEFAULT_PRESET) {
+  return {
+    base,
+    initial_hours: cfg.initial_hours,
+    remembered_mult: cfg.remembered_mult,
+    forgot_mult: cfg.forgot_mult,
+    min_hours: cfg.min_hours,
+    max_hours: cfg.max_hours,
+  };
 }
 
 // 夾擠順序有意義：先 base = max(current, min) 再乘、再夾回 [min, max]。
@@ -70,6 +115,7 @@ function applyFeedback(state, remembered, cfg, now) {
 
 export {
   FORGOT, REMEMBERED, UNLEARNED, DUE, REVIEWED,
-  PRESETS, DEFAULT_PRESET, params,
+  PRESETS, DEFAULT_PRESET, CUSTOM_PRESET, params, resolve, asParams,
+  REMEMBERED_MULT_RANGE, FORGOT_MULT_RANGE, clampMult,
   nextIntervalHours, deriveState, applyFeedback,
 };

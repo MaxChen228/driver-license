@@ -74,6 +74,19 @@ next = clamp(base × (答對 ? 2.5 : 0.5), min, max)
 |---|---|---|---|---|---|
 | relaxed（預設） | 24h | 2.5 | 0.5 | 6h | 1440h（60 天） |
 | intensive | 8h | 1.4 | 0.35 | 4h | 1440h |
+| custom | 沿用切換當下那組 | 1.05–5 | 0.1–0.95 | 沿用 | 沿用 |
+
+`custom` 只開放兩個倍率，切過去時用當下那組 preset 當種子（所以第一眼跟切之前
+一樣）。邊界不是美觀問題：答對倍率 ≤ 1 的話間隔永遠不成長、卡全部黏在下限，
+答錯倍率 ≥ 1 則是「忘了」不縮短間隔 —— 兩者都讓排程失去意義，所以是硬夾擠
+（超出範圍收回邊界，不回 400）。
+
+**改倍率只對之後的作答有用，不追溯改寫過去。** 這在「事件日誌 + 整段重算」的
+系統裡不是免費的：具名 preset 的事件只存名字（名字對應的數值永遠不變），
+而 custom 的數值會被改，所以 custom 的事件把當時那五個值一起存進
+`review_event.preset_params`（前端的本機事件是 `ev.preset_params`）。
+`tests/test_custom_preset.py::test_changing_multipliers_does_not_rewrite_history`
+釘住這件事。
 
 三個不能改的細節（`tests/test_srs.py` 把每個分支釘死）：
 
@@ -150,9 +163,11 @@ uv run python tools/useradmin.py set-password max
 
 ## 資料庫版本
 
-`PRAGMA user_version` 記 schema 版本，目前是 **3**。
+`PRAGMA user_version` 記 schema 版本，目前是 **4**。
 v2 = 多租戶（每列都掛 `user_id`）、v3 = `review_event` 記下作答當下的 preset
-（重算歷史時要用「當時」的參數，否則換一次 preset 就會把過去追溯改寫）。
+（重算歷史時要用「當時」的參數，否則換一次 preset 就會把過去追溯改寫）、
+v4 = `review_event.preset_params`，custom 那一刻的五個數值快照（名字查不到
+會變的數值，見「學習模型」）。
 `app.main` 一被 import 就跑 `db.init()`，需要時就地遷移，**不可逆**（v1 的舊表會被 drop）。
 認不得的版本會直接拒絕開啟，不會靜默蓋章。
 

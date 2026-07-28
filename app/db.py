@@ -8,17 +8,26 @@ DB 檔放 repo 外（預設 ~/driver-license-data/app.db），git pull / reset �
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .srs import DEFAULT_PRESET, REMEMBERED, CardState, ReviewSettings, apply_feedback
+from .srs import (
+    CUSTOM_PRESET,
+    DEFAULT_PRESET,
+    REMEMBERED,
+    CardState,
+    ReviewSettings,
+    apply_feedback,
+    resolve,
+)
 
 DATA_DIR = Path(os.environ.get("DL_DATA_DIR", Path.home() / "driver-license-data"))
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS user (
@@ -82,7 +91,11 @@ CREATE TABLE IF NOT EXISTS review_event (
   -- 作答當下生效的 preset 名稱。rebuild_card 要能重現「當時」算出來的結果，
   -- 拿現在的參數去重算整段歷史，等於換一次 preset 就把過去全部改寫。
   -- NULL 只會出現在 v3 之前寫下的事件（那時沒有記錄，資訊已經不在了）。
-  preset TEXT
+  preset TEXT,
+  -- preset='custom' 專用：那一刻的五個數值（JSON）。具名 preset 存名字就夠，
+  -- 因為名字對應的數值永遠不變；custom 的數值會被使用者改，只存名字等於讓
+  -- 每次調倍率都把過去整段重寫 —— 正是上面那條註解在防的事。
+  preset_params TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_event_day ON review_event(user_id, deck, day_key);
 CREATE INDEX IF NOT EXISTS idx_event_card ON review_event(user_id, card_id, reviewed_at);
@@ -174,6 +187,16 @@ def _upgrade_v2_to_v3(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE review_event ADD COLUMN preset TEXT")
 
 
+def _upgrade_v3_to_v4(conn: sqlite3.Connection) -> None:
+    """review_event 加 preset_params 欄（custom 那一刻的數值快照）。
+
+    舊事件留 NULL：它們都是具名 preset，名字查得到數值，不需要快照。
+    """
+    have = {r["name"] for r in conn.execute("PRAGMA table_info(review_event)")}
+    if "preset_params" not in have:
+        conn.execute("ALTER TABLE review_event ADD COLUMN preset_params TEXT")
+
+
 def _rebuild_from_v1(conn: sqlite3.Connection) -> None:
     """把單租戶的 v1 資料整批搬給 user 1。
 
@@ -259,9 +282,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
         if _is_v1(conn):
             _rebuild_from_v1(conn)
         version = SCHEMA_VERSION
-    elif version == 2:
+    if version == 2:
         _upgrade_v2_to_v3(conn)
         version = 3
+    if version == 3:
+        _upgrade_v3_to_v4(conn)
+        version = 4
 
     if version != SCHEMA_VERSION:
         raise RuntimeError(f"沒有 v{version} → v{SCHEMA_VERSION} 的遷移路徑")
@@ -471,6 +497,26 @@ def log_event(conn: sqlite3.Connection, user_id: int, **kw) -> None:
     )
 
 
+def event_settings(row) -> ReviewSettings | None:
+    """一筆事件當時生效的參數。None＝這筆沒記（v3 之前），呼叫端只能用現在的。
+
+    custom 讀 preset_params 那份快照；具名 preset 一律查表，就算 preset_params
+    有東西也不理它 —— 名字與數值對不起來的事件不該有第二種解釋。
+    """
+    name = row["preset"]
+    if not name:
+        return None
+    if name != CUSTOM_PRESET:
+        return ReviewSettings.preset(name)
+    raw = row["preset_params"] if "preset_params" in row.keys() else None
+    try:
+        return resolve(name, json.loads(raw) if raw else None)
+    except (ValueError, TypeError):
+        # 快照壞掉（手改過 DB、或未來版本寫進了讀不懂的東西）不該讓整段重算炸掉。
+        # 退回預設比丟例外好：使用者看到的是排程稍微偏，而不是整個帳號打不開。
+        return resolve(name, None)
+
+
 def event_exists(conn: sqlite3.Connection, user_id: int, client_event_id: str) -> bool:
     """離線補送的冪等閘門：同一個 client_event_id 只能算一次分。
 
@@ -547,7 +593,7 @@ def rebuild_card(
     """
     state = None
     for r in _events_for_card(conn, user_id, card_id):
-        ev_cfg = ReviewSettings.preset(r["preset"]) if r["preset"] else cfg
+        ev_cfg = event_settings(r) or cfg
         # 首答用「該筆事件」的 initial_hours 當 base，所以 fresh() 也要跟著它
         before, at = state or CardState.fresh(ev_cfg), parse(r["reviewed_at"])
         state = apply_feedback(before, r["feedback"] == REMEMBERED, ev_cfg, at)
@@ -607,6 +653,21 @@ def set_setting(conn: sqlite3.Connection, user_id: int, key: str, value: str) ->
 
 def preset_name(conn: sqlite3.Connection, user_id: int) -> str:
     return get_setting(conn, user_id, "preset", DEFAULT_PRESET)
+
+
+def custom_params(conn: sqlite3.Connection, user_id: int) -> dict | None:
+    raw = get_setting(conn, user_id, "custom_params", "")
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return None
+
+
+def user_settings(conn: sqlite3.Connection, user_id: int) -> ReviewSettings:
+    """這個帳號現在生效的參數（custom 的話帶上他自己那組數值）。"""
+    return resolve(preset_name(conn, user_id), custom_params(conn, user_id))
 
 
 def reference_now(conn: sqlite3.Connection, user_id: int, now: datetime) -> datetime:

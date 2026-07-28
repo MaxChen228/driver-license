@@ -30,7 +30,7 @@ def test_config_is_public_and_carries_the_bank_catalogue(anon_client):
     from app.deck import DECKS
 
     assert {d["deck"] for d in b["decks"]} == set(DECKS)
-    assert b["presets"] == ["relaxed", "intensive"]
+    assert b["presets"] == ["relaxed", "intensive", "custom"]
     assert b["default_preset"] == "relaxed"
     # 版號進 URL：題庫換版才換網址，邊緣與瀏覽器才能長期快取又不會拿到舊的
     urls = {d["deck"]: d["url"] for d in b["decks"]}

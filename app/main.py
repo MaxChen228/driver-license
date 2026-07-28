@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import random
 import sqlite3
@@ -74,7 +75,13 @@ CurrentUser = Depends(auth.require_user)
 
 
 def _cfg(conn, user_id: int) -> srs.ReviewSettings:
-    return srs.ReviewSettings.preset(db.preset_name(conn, user_id))
+    return db.user_settings(conn, user_id)
+
+
+def _preset_names() -> list[str]:
+    """可以出現在設定選單裡的名字。custom 不在 srs.PRESETS 裡（它沒有固定數值），
+    但它是一個合法的選項，所以這裡補上 —— 前端與驗證都以這份為準。"""
+    return [*srs.PRESETS, srs.CUSTOM_PRESET]
 
 
 def _now(conn, user_id: int, at: datetime | None = None):
@@ -416,6 +423,7 @@ def decks(user: sqlite3.Row = CurrentUser):
         return {
             "decks": out,
             "preset": db.preset_name(conn, uid),
+            "custom_params": db.custom_params(conn, uid),
             "paused": db.get_setting(conn, uid, "paused", "0") == "1",
         }
 
@@ -538,7 +546,13 @@ def _record(conn, user_id: int, q: dict, chosen: int | None, correct: bool, reme
     """呼叫端必須在 db.session(write=True) 之內（regrade 的 DELETE + 重打要同一交易）。"""
     now = _now(conn, user_id, reviewed_at)
     preset = db.preset_name(conn, user_id)
-    cfg = srs.ReviewSettings.preset(preset)
+    cfg = _cfg(conn, user_id)
+    # custom 的數值會被改，只存名字等於讓每次調倍率都把過去整段重寫 ——
+    # 所以把「這一刻」那五個值一起寫進事件（見 db.rebuild_card / event_settings）。
+    preset_params = (
+        json.dumps(srs.as_params(cfg, base=str((db.custom_params(conn, user_id) or {}).get("base") or srs.DEFAULT_PRESET)))
+        if preset == srs.CUSTOM_PRESET else None
+    )
     after = srs.apply_feedback(before, remembered, cfg, now)
     db.put_state(conn, user_id, q["id"], q["deck"], after)
     db.log_event(
@@ -566,6 +580,7 @@ def _record(conn, user_id: int, q: dict, chosen: int | None, correct: bool, reme
         lapse_after=after.lapse_count,
         client_event_id=client_event_id,
         preset=preset,  # 重算時要用「當時」的參數，不是現在的
+        preset_params=preset_params,
     )
 
     # 亂序偵測：這張卡若已經有比 now 更晚的事件，剛剛那筆增量套用就是把舊事件
@@ -661,8 +676,14 @@ def _config_payload() -> dict:
     """
     return {
         "server_time": db.iso(srs.utcnow()),
-        "presets": list(srs.PRESETS),
+        "presets": _preset_names(),
         "default_preset": srs.DEFAULT_PRESET,
+        # custom 的可調範圍。前端要拿它做輸入的 min/max 與提示文字；由伺服器
+        # 下發是為了讓「合法值」只有一個定義（PUT /api/settings 用同一組夾擠）。
+        "mult_range": {
+            "remembered": list(srs.REMEMBERED_MULT_RANGE),
+            "forgot": list(srs.FORGOT_MULT_RANGE),
+        },
         # 有設 sitekey 前端才渲染 widget。兩者必須一起開：只設 secret 而前端沒有
         # widget 的話，每一次註冊都會拿到「人機驗證未通過」，而且看不出為什麼。
         "turnstile_sitekey": TURNSTILE_SITEKEY or None,
@@ -697,6 +718,7 @@ def _state_payload(conn, user_id: int) -> dict:
         "server_time": db.iso(srs.utcnow()),
         "reference_time": db.iso(_now(conn, user_id)),  # 凍結時鐘生效時會與 server_time 不同
         "preset": db.preset_name(conn, user_id),
+        "custom_params": db.custom_params(conn, user_id),
         "paused": db.get_setting(conn, user_id, "paused", "0") == "1",
         "paused_at": db.get_setting(conn, user_id, "paused_at", "") or None,
         "states": db.all_states(conn, user_id),
@@ -970,9 +992,19 @@ def stats(deck: str = Query(...), user: sqlite3.Row = CurrentUser):
 # ---------------------------------------------------------------- settings
 
 
+class CustomParamsIn(BaseModel):
+    """使用者自己調的兩個倍率。其餘三個值（首次、上下限）沿用切換當下那組
+    preset，不由前端指定 —— 這一版只開放這兩個旋鈕，少一個能被亂餵的入口。"""
+
+    base: str | None = None
+    remembered_mult: float
+    forgot_mult: float
+
+
 class SettingsIn(BaseModel):
     preset: str | None = None
     paused: bool | None = None
+    custom_params: CustomParamsIn | None = None
 
 
 @app.get("/api/settings")
@@ -985,7 +1017,8 @@ def _settings_payload(conn, user_id: int) -> dict:
     cfg = _cfg(conn, user_id)
     return {
         "preset": db.preset_name(conn, user_id),
-        "presets": list(srs.PRESETS),
+        "presets": _preset_names(),
+        "custom_params": db.custom_params(conn, user_id),
         "paused": db.get_setting(conn, user_id, "paused", "0") == "1",
         "paused_at": db.get_setting(conn, user_id, "paused_at", "") or None,
         "params": {
@@ -1002,9 +1035,30 @@ def _settings_payload(conn, user_id: int) -> dict:
 def put_settings(payload: SettingsIn, user: sqlite3.Row = CurrentUser):
     with db.session(write=True) as conn:
         uid = user["id"]
+        # 先寫 custom_params 再寫 preset：兩個一起送時（切到 custom 的那一次），
+        # 順序反過來會有一瞬間 preset=custom 但沒有數值可用。
+        if payload.custom_params is not None:
+            base = payload.custom_params.base or db.preset_name(conn, uid)
+            if base not in srs.PRESETS:
+                base = srs.DEFAULT_PRESET
+            cfg = srs.custom_settings(
+                srs.PRESETS[base],
+                payload.custom_params.remembered_mult,
+                payload.custom_params.forgot_mult,
+            )
+            db.set_setting(conn, uid, "custom_params", json.dumps(srs.as_params(cfg, base=base)))
         if payload.preset is not None:
-            if payload.preset not in srs.PRESETS:
+            if payload.preset not in _preset_names():
                 raise HTTPException(400, f"unknown preset: {payload.preset}")
+            if payload.preset == srs.CUSTOM_PRESET and db.custom_params(conn, uid) is None:
+                # 沒有數值就切過去 = 一個沒有內容的 custom。用現在這組當種子，
+                # 使用者的第一眼因此是「跟剛才一樣」，再自己往上下調。
+                cur = db.preset_name(conn, uid)
+                base = cur if cur in srs.PRESETS else srs.DEFAULT_PRESET
+                db.set_setting(
+                    conn, uid, "custom_params",
+                    json.dumps(srs.as_params(srs.PRESETS[base], base=base)),
+                )
             db.set_setting(conn, uid, "preset", payload.preset)
         if payload.paused is not None:
             if payload.paused:

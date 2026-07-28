@@ -93,6 +93,65 @@ def test_js_and_python_schedulers_agree(tmp_path):
         assert [j[0], j_at, *j[2:]] == p, f"{case} 不一致：js={j} py={p}"
 
 
+CUSTOM_CASES = [
+    # (params, interval_hours, review_count, remembered)
+    ({"base": "relaxed", "remembered_mult": 1.8, "forgot_mult": 0.4}, 24.0, 1, True),
+    ({"base": "relaxed", "remembered_mult": 1.8, "forgot_mult": 0.4}, 24.0, 1, False),
+    ({"base": "intensive", "remembered_mult": 3.0, "forgot_mult": 0.2}, 8.0, 0, True),
+    # 超出範圍：兩邊都要夾到同一個邊界，不能一邊夾一邊不夾
+    ({"base": "relaxed", "remembered_mult": 99, "forgot_mult": 0.001}, 24.0, 2, True),
+    ({"base": "relaxed", "remembered_mult": 0.5, "forgot_mult": 5}, 24.0, 2, False),
+    # 缺欄位／壞值：兩邊都要退回 base 的數值
+    ({"base": "intensive"}, 8.0, 3, True),
+    ({}, 24.0, 3, False),
+]
+
+CUSTOM_HARNESS = """
+import * as srs from "./srs.mjs";
+const cases = JSON.parse(process.argv[2]);
+const now = new Date(process.argv[3]);
+const out = cases.map(([params, interval, count, remembered]) => {
+  const cfg = srs.resolve("custom", params);
+  const s = { interval_hours: interval, review_count: count,
+              lapse_count: 0, streak: 0, last_feedback: -1 };
+  const a = srs.applyFeedback(s, remembered, cfg, now);
+  return [cfg.remembered_mult, cfg.forgot_mult, cfg.initial_hours,
+          cfg.min_hours, cfg.max_hours, a.interval_hours];
+});
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def test_js_and_python_custom_preset_agree(tmp_path):
+    """custom 是使用者自己調的倍率 —— 兩邊的夾擠與 fallback 也必須一致。
+
+    這裡比的不只是排程結果，還有 resolve() 解出來的五個值：邊界夾在哪、缺欄位
+    退回什麼，只要有一邊不同，離線算的下次複習時間就跟同步後的不一樣。
+    """
+    shutil.copy(ROOT / "static" / "srs.js", tmp_path / "srs.mjs")
+    (tmp_path / "h.mjs").write_text(CUSTOM_HARNESS, encoding="utf-8")
+    now = datetime(2026, 7, 20, 2, 0, tzinfo=timezone.utc)
+
+    proc = subprocess.run(
+        [NODE, str(tmp_path / "h.mjs"), json.dumps(CUSTOM_CASES), now.isoformat()],
+        capture_output=True, text=True, cwd=tmp_path, check=True,
+    )
+    js = json.loads(proc.stdout)
+
+    py = []
+    for params, interval, count, remembered in CUSTOM_CASES:
+        cfg = srs.resolve(srs.CUSTOM_PRESET, params)
+        state = srs.CardState(interval, None, None, count, 0, 0, -1)
+        a = srs.apply_feedback(state, remembered, cfg, now)
+        py.append([
+            cfg.remembered_mult, cfg.forgot_mult, cfg.initial_hours,
+            cfg.min_hours, cfg.max_hours, a.review_interval_hours,
+        ])
+
+    for case, j, p in zip(CUSTOM_CASES, js, py):
+        assert j == p, f"{case} 不一致：js={j} py={p}"
+
+
 def test_js_and_python_derive_state_agree(tmp_path):
     shutil.copy(ROOT / "static" / "srs.js", tmp_path / "srs.mjs")
     (tmp_path / "h.mjs").write_text(

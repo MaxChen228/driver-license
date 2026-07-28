@@ -37,7 +37,13 @@ let ME = null;      // 登入中的帳號（未登入為 null）
 let S = null;       // 目前 session
 let syncing = false;
 
-const params = () => srs.params(SNAP.preset);
+// 現在生效的參數。custom 時帶上使用者自己那組數值。
+const params = () => srs.resolve(SNAP.preset, SNAP.custom_params);
+// 一筆事件當時生效的參數。custom 的數值會被改，所以事件自帶快照 ——
+// 沒有快照的舊事件（或具名 preset）就走名字。這是「改設定只對往後有用、
+// 不重寫過去」的實作：重放時每筆各用各的，不是全部套現在這組。
+const eventParams = (ev) =>
+  srs.resolve(ev.preset || SNAP.preset, ev.preset_params || (ev.preset ? null : SNAP.custom_params));
 const signedIn = () => MODE === "account";
 
 // ── 開機 ──────────────────────────────────────────────
@@ -92,6 +98,7 @@ async function boot() {
 function emptySnapshot() {
   return {
     preset: (CONFIG && CONFIG.default_preset) || srs.DEFAULT_PRESET,
+    custom_params: null,
     paused: false, paused_at: null, states: [], notes: {},
   };
 }
@@ -143,6 +150,7 @@ function adopt(payload) {
   return {
     ...payload,
     preset: payload.preset || srs.DEFAULT_PRESET,
+    custom_params: payload.custom_params || null,
     states: new Map((payload.states || []).map((s) => [s.id, s])),
     notes: new Map(Object.entries(payload.notes || {})),
   };
@@ -236,8 +244,7 @@ async function replayPending() {
       {
         id: ev.card_id, deck: q.deck,
         ...srs.applyFeedback(SNAP.states.get(ev.card_id), remembered,
-                             srs.params(ev.preset || SNAP.preset),
-                             new Date(ev.reviewed_at)),
+                             eventParams(ev), new Date(ev.reviewed_at)),
       }
     );
   }
@@ -623,6 +630,8 @@ async function submit(chosen, guessed = false) {
     elapsed_ms: Math.round(performance.now() - S.t0),
     reviewed_at: new Date().toISOString(),   // 真實牆鐘時間，供熱力圖與補送排序
     preset: SNAP.preset,  // 重放時要用「當時」的參數，不是現在的（比照 schema v3）
+    // custom 的數值會被改，只存名字等於讓每次調倍率都把過去整段重寫。
+    ...(SNAP.preset === srs.CUSTOM_PRESET ? { preset_params: SNAP.custom_params } : {}),
   };
   // events 是這台裝置的完整歷史，兩種模式都寫、永遠留著（登入時要拿它併進帳號，
   // 匿名時要拿它算正確率與連續天數）。outbox 只是待補送佇列，匿名模式不寫 ——
@@ -1206,6 +1215,45 @@ async function localStats(deck) {
 $("#st-deck").addEventListener("change", renderStats);
 
 // ── 設定 ──────────────────────────────────────────────
+const PRESET_LABEL = {
+  relaxed: "relaxed（寬鬆，預設）",
+  intensive: "intensive（密集）",
+  custom: "custom（自訂倍率）",
+};
+
+// custom 的兩個旋鈕。範圍由伺服器下發（CONFIG.mult_range），前端不自己定一套 ——
+// 合法值只該有一個定義，否則會出現「輸入框收得下、伺服器卻夾掉」的落差。
+function customMultRow(p, off) {
+  const r = (CONFIG.mult_range || {});
+  const rr = r.remembered || srs.REMEMBERED_MULT_RANGE;
+  const fr = r.forgot || srs.FORGOT_MULT_RANGE;
+  // 直接把數字換算成「這張卡下次會排到多久」—— ×1.4 對一般人不是一個有感覺的
+  // 量，而「8 小時 → 11 小時」是。用首次間隔當基準，因為那是每張新卡的實際起點。
+  const preview = (mult) => fmtHours(
+    Math.min(p.max_hours, Math.max(p.min_hours, p.initial_hours * mult))
+  );
+  return `
+    <div class="mults">
+      <label class="mult">
+        <span class="field-label">答對 ×</span>
+        <input id="set-mult-ok" class="input" type="number" inputmode="decimal"
+               min="${rr[0]}" max="${rr[1]}" step="0.05" value="${p.remembered_mult}"
+               ${off ? "disabled" : ""}>
+        <span class="mult-note">${fmtHours(p.initial_hours)} → ${preview(p.remembered_mult)}</span>
+      </label>
+      <label class="mult">
+        <span class="field-label">答錯 ×</span>
+        <input id="set-mult-bad" class="input" type="number" inputmode="decimal"
+               min="${fr[0]}" max="${fr[1]}" step="0.05" value="${p.forgot_mult}"
+               ${off ? "disabled" : ""}>
+        <span class="mult-note">${fmtHours(p.initial_hours)} → ${preview(p.forgot_mult)}</span>
+      </label>
+    </div>
+    <p class="muted set-hint">改了立刻生效，只影響之後的作答 ——
+    已經排好的那些不會被重算（每筆作答都記著它當時用的倍率）。
+    答對倍率 ${rr[0]}–${rr[1]}、答錯倍率 ${fr[0]}–${fr[1]}，超出範圍會被收回邊界。</p>`;
+}
+
 async function renderSettings() {
   const p = params();
   // 只有「登入 + 離線」才改不動設定：那時伺服器是權威，本地改了會跟它對不起來。
@@ -1221,7 +1269,8 @@ async function renderSettings() {
         <div><dt>範圍</dt><dd>${fmtHours(p.min_hours)}–${fmtHours(p.max_hours)}</dd></div>
       </dl>
       <select id="set-preset" class="input" ${off ? "disabled" : ""}>${CONFIG.presets.map((n) =>
-        `<option value="${n}" ${n === SNAP.preset ? "selected" : ""}>${n === "relaxed" ? "relaxed（寬鬆，預設）" : "intensive（密集）"}</option>`).join("")}</select>
+        `<option value="${n}" ${n === SNAP.preset ? "selected" : ""}>${PRESET_LABEL[n] || n}</option>`).join("")}</select>
+      ${SNAP.preset === srs.CUSTOM_PRESET ? customMultRow(p, off) : ""}
       ${off ? `<p class="muted set-hint">離線時無法變更 —— 登入後這是帳號設定，由伺服器裁決。</p>` : ""}
     </div>
     <div class="set-block">
@@ -1293,6 +1342,12 @@ async function renderSettings() {
     await store.kvPut("round_size", ROUND);
   });
   $("#set-preset").addEventListener("change", (e) => setSetting({ preset: e.target.value }));
+  // change 而不是 input：input 會在打「1.」的中間狀態就送出（parse 成 1 → 夾到
+  // 下限 1.05），使用者還沒打完就看到數字被改掉。change 是離開輸入框／按 Enter。
+  ["#set-mult-ok", "#set-mult-bad"].forEach((sel) => {
+    const el = $(sel);
+    if (el) el.addEventListener("change", saveMults);
+  });
   $("#set-pause").addEventListener("change", (e) => setSetting({ paused: e.target.checked }));
   bindAccountHandlers();
   $("#set-export").addEventListener("click", exportData);
@@ -1598,7 +1653,8 @@ async function exportData() {
     exported_at: new Date().toISOString(),
     events: await store.eventsAll(),
     notes: Object.fromEntries(SNAP.notes),
-    settings: { preset: SNAP.preset, paused: SNAP.paused, paused_at: SNAP.paused_at },
+    settings: { preset: SNAP.preset, custom_params: SNAP.custom_params,
+                paused: SNAP.paused, paused_at: SNAP.paused_at },
   };
   const url = URL.createObjectURL(
     new Blob([JSON.stringify(payload)], { type: "application/json" })
@@ -1647,12 +1703,12 @@ async function importData(file) {
     SNAP.states.set(ev.card_id, {
       id: ev.card_id, deck: q.deck,
       ...srs.applyFeedback(SNAP.states.get(ev.card_id), remembered,
-                           srs.params(ev.preset || SNAP.preset),
-                           new Date(ev.reviewed_at)),
+                           eventParams(ev), new Date(ev.reviewed_at)),
     });
   }
   for (const [k, v] of Object.entries(data.notes || {})) SNAP.notes.set(k, v);
   if (data.settings && data.settings.preset) SNAP.preset = data.settings.preset;
+  if (data.settings && data.settings.custom_params) SNAP.custom_params = data.settings.custom_params;
   await persist();
   if (signedIn()) {
     for (const ev of data.events) await store.outboxPut(ev);
@@ -1756,6 +1812,21 @@ function mountTurnstile() {
   document.head.appendChild(sc);
 }
 
+// 兩個輸入框 → 一筆設定。夾擠在這裡先做一次（伺服器會再做一次，兩邊同一組
+// 邊界）：使用者送出「×9」時看到的是被收回 5，而不是一個安靜被改掉的值。
+function saveMults() {
+  const p = params();
+  const ok = $("#set-mult-ok");
+  const bad = $("#set-mult-bad");
+  return setSetting({
+    custom_params: {
+      base: (SNAP.custom_params && SNAP.custom_params.base) || srs.DEFAULT_PRESET,
+      remembered_mult: srs.clampMult(ok ? ok.value : p.remembered_mult, srs.REMEMBERED_MULT_RANGE),
+      forgot_mult: srs.clampMult(bad ? bad.value : p.forgot_mult, srs.FORGOT_MULT_RANGE),
+    },
+  });
+}
+
 async function setSetting(patch) {
   if (signedIn()) {
     try {
@@ -1770,7 +1841,23 @@ async function setSetting(patch) {
     }
   }
   if (!signedIn()) {
-    if (patch.preset !== undefined) SNAP.preset = patch.preset;
+    // 存成完整的五個值（跟伺服器那份同形狀），不要只存使用者改的那兩個 ——
+    // 兩種形狀混在同一個欄位裡，之後每個讀的人都要先猜自己拿到的是哪一種。
+    if (patch.custom_params !== undefined) {
+      const base = patch.custom_params.base || srs.DEFAULT_PRESET;
+      SNAP.custom_params = srs.asParams(
+        srs.resolve(srs.CUSTOM_PRESET, patch.custom_params), base
+      );
+    }
+    if (patch.preset !== undefined) {
+      // 切到 custom 但還沒有數值：用現在這組當種子，第一眼就是「跟剛才一樣」，
+      // 再自己往上下調。與 app/main.py 的 put_settings 同一套規則。
+      if (patch.preset === srs.CUSTOM_PRESET && !SNAP.custom_params) {
+        const cur = srs.PRESETS[SNAP.preset] ? SNAP.preset : srs.DEFAULT_PRESET;
+        SNAP.custom_params = srs.asParams(srs.PRESETS[cur], cur);
+      }
+      SNAP.preset = patch.preset;
+    }
     if (patch.paused !== undefined) {
       SNAP.paused = patch.paused;
       // 進入暫停時把當下時間凍住，之後所有到期計算都用它 —— 與 app/main.py 同一套

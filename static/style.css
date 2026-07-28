@@ -816,6 +816,14 @@ main {
 
 /* 內聯 style 屬性會被 CSP 擋掉（style-src 不含 'unsafe-inline'），改用 class */
 .set-hint { margin-top: var(--space-2); }
+
+/* custom 的兩個倍率。並排而不是上下疊：它們是一組對照（答對 vs 答錯），
+   分開排會讓人以為是兩件不相干的設定。 */
+.mults { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); margin-top: var(--space-3); }
+.mult { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.mult .input { max-width: none; font-variant-numeric: tabular-nums; }
+.mult-note { font-size: 12px; color: var(--color-muted); font-variant-numeric: tabular-nums; }
+@media (max-width: 420px) { .mults { grid-template-columns: 1fr; } }
 .prose { max-width: 40rem; }
 .prose h2 { margin-top: var(--space-6); }
 
