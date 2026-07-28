@@ -37,6 +37,12 @@ ROOT = Path(__file__).resolve().parent.parent
 # 那才是真正有價值的那份（實測過：docs_url=None 時 /openapi.json 仍回 200）。
 IS_PROD = os.environ.get("DL_ENV") == "prod"
 
+# 危險感知影片放哪。空字串（預設）＝ 由本服務從 data/videos/ 供應，開發與內網用。
+# 設成 "https://videos.wordnexus.lol" 就改由 R2 直出：333 MB 走家用上行撐不住，
+# 而 R2 的 egress 免費、又在同一個 CF 帳號底下。
+# 一個環境變數同時決定三件事，不能各自為政：前端組網址、CSP 開口、SW 略過快取。
+VIDEO_ORIGIN = os.environ.get("DL_VIDEO_ORIGIN", "").rstrip("/")
+
 app = FastAPI(
     title="driver-license",
     docs_url=None if IS_PROD else "/api/docs",
@@ -150,6 +156,12 @@ async def security_middleware(request: Request, call_next):
         "form-action 'self'",
         "frame-ancestors 'none'",
     ]
+    # 影片搬到 R2 之後就不再是同源，而 media-src 沒寫的話會 fallback 到
+    # default-src 'self' —— <video> 會被 CSP 擋掉，畫面上是一塊放不出來的黑框，
+    # console 以外沒有任何跡象。img-src 一併開，poster 走的是 img-src 不是 media-src。
+    if VIDEO_ORIGIN:
+        csp.append(f"media-src 'self' {VIDEO_ORIGIN}")
+        csp[1] = f"img-src 'self' data: {VIDEO_ORIGIN}"
     # Turnstile 要載入 challenges.cloudflare.com 的 script 與 iframe。沒啟用就不要開這個口。
     if TURNSTILE_SITEKEY:
         csp.append("script-src 'self' https://challenges.cloudflare.com")
@@ -654,6 +666,10 @@ def _config_payload() -> dict:
         # 有設 sitekey 前端才渲染 widget。兩者必須一起開：只設 secret 而前端沒有
         # widget 的話，每一次註冊都會拿到「人機驗證未通過」，而且看不出為什麼。
         "turnstile_sitekey": TURNSTILE_SITEKEY or None,
+        # 影片的來源。空字串＝同源的 /videos（開發與內網）；正式站指向 R2。
+        # 由伺服器下發而不是寫死在 app.js：換儲存後端不必動前端，而且 SW 已經
+        # 在快取 /api/config，離線時也知道該去哪（雖然離線本來就播不了影片）。
+        "video_origin": VIDEO_ORIGIN,
         "decks": [
             {
                 "deck": k,
@@ -1007,13 +1023,17 @@ IMMUTABLE = "public, max-age=31536000, immutable"
 
 
 class _Images(StaticFiles):
-    """題目圖：一年、immutable。
+    """題目圖與危險感知影片：一年、immutable。
 
-    檔名是題號（C0001_1.png），內容綁定題號、不會就地改版 —— 題庫改版是換一份
-    JSON，圖檔要嘛沿用、要嘛換名字，所以「同一個網址的內容永遠不變」是成立的。
+    題目圖的檔名是題號（C0001_1.png），內容綁定題號、不會就地改版 —— 題庫改版是
+    換一份 JSON，圖檔要嘛沿用、要嘛換名字，所以「同一個網址的內容永遠不變」成立。
 
-    這件事在公網上的份量與內網完全不同：354 張圖 1.8 MB，每個新訪客都回原站的話
-    走的是家用上行。給了 immutable，CF 邊緣才擋得下來。
+    影片更乾脆：檔名就是「原始檔 md5 ＋ 轉檔參數」的雜湊（見
+    tools/transcode_hazard_videos.py），內容變了檔名一定跟著變，
+    immutable 是這裡最誠實的標頭。
+
+    這件事在公網上的份量與內網完全不同：354 張圖 1.8 MB 加上影片幾百 MB，
+    每個新訪客都回原站的話走的是家用上行。給了 immutable，CF 邊緣才擋得下來。
     """
 
     async def get_response(self, path, scope):
@@ -1046,6 +1066,18 @@ class _Static(StaticFiles):
 
 
 app.mount("/images", _Images(directory=DATA_DIR / "images"), name="images")
+# 影片不進 git（data/videos/ 在 .gitignore 裡，內容由 tools/fetch+transcode 重生，
+# 或乾脆由 R2 供應），所以「沒跑過影片 pipeline」是全新 clone、CI 與 git worktree
+# 的正常狀態。而 StaticFiles 對不存在的目錄是在建構時就 raise —— 連 import
+# app.main 都會失敗（實測：99 個測試在 setup 就 error，死因是
+# RuntimeError: Directory '.../data/videos' does not exist）。
+#
+# 建一個空目錄而不是 check_dir=False：後者只跳過建構時的檢查，請求進來照樣
+# 在 stat 時 raise，變成 500 而不是 404。也不用「存在才 mount」——那會讓路由
+# 表隨環境改變，測到的東西跟生產跑的東西不是同一份。
+# db.init() 對 DATA_DIR 用的是同一招。
+(DATA_DIR / "videos").mkdir(parents=True, exist_ok=True)
+app.mount("/videos", _Images(directory=DATA_DIR / "videos"), name="videos")
 app.mount("/static", _Static(directory=ROOT / "static"), name="static")
 
 

@@ -1,6 +1,11 @@
 """API 端到端測試。用臨時 DL_DATA_DIR，不碰真實進度。"""
 
+from pathlib import Path
+
 import pytest
+from fastapi.testclient import TestClient
+
+ROOT = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture(scope="module")
@@ -180,6 +185,70 @@ def test_service_worker_shell_list_matches_disk(client):
         assert client.get(u).status_code == 200, u
 
 
+def test_every_css_variable_is_defined():
+    """style.css 不得引用任何沒定義過的自訂屬性。
+
+    CSS 對未定義的 var() 是 invalid-at-computed-value-time：整個宣告退成 unset，
+    邊框直接消失、顏色掉回 inherit，而且完全沒有錯誤訊息 —— 靠肉眼看不出來。
+    commit 243ce79 修過一次（--line / --muted / --accent 三個不存在的名字讓救援碼
+    那個「刻意要擋住流程」的框完全沒有框），當時只做了一次性的人工檢查，
+    後來又再犯一次。這次釘進測試。
+
+    帶 fallback 的 var(--x, ...) 一樣要求 --x 存在：fallback 是給「這個值可能
+    沒設」用的，不是給打錯字用的。
+    """
+    import re
+
+    css = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+    defined = set(re.findall(r"(--[\w-]+)\s*:", css))
+    used = set(re.findall(r"var\(\s*(--[\w-]+)", css))
+    assert not (used - defined), f"用了沒定義的自訂屬性：{sorted(used - defined)}"
+
+
+def test_video_origin_opens_the_csp_it_needs(tmp_path, monkeypatch):
+    """影片搬到 R2 之後，CSP 必須同時開 media-src 與 img-src。
+
+    這是會安靜壞掉的那種：media-src 沒寫就 fallback 到 default-src 'self'，
+    <video> 被擋成一塊放不出來的黑框，console 以外沒有任何跡象。poster 走的是
+    img-src 不是 media-src，兩個都要開 —— 只開一個的話影片能播但清單縮圖全空。
+
+    同時釘住預設（未設環境變數）不得有 media-src：內網／開發是同源供應，
+    多開一個口沒有理由。
+    """
+    import importlib
+
+    from tests.conftest import data_dir_env
+
+    def csp_and_config(origin):
+        if origin is None:
+            monkeypatch.delenv("DL_VIDEO_ORIGIN", raising=False)
+        else:
+            monkeypatch.setenv("DL_VIDEO_ORIGIN", origin)
+        with data_dir_env(tmp_path / (origin or "none").replace("/", "_")):
+            import app.db
+            import app.main
+
+            importlib.reload(app.db)
+            main = importlib.reload(app.main)
+            c = TestClient(main.app, base_url="https://testserver")
+            return c.get("/").headers["content-security-policy"], \
+                c.get("/api/config").json()["video_origin"]
+
+    csp, origin = csp_and_config(None)
+    assert origin == ""
+    assert "media-src" not in csp
+
+    r2 = "https://videos.wordnexus.lol"
+    csp, origin = csp_and_config(r2)
+    assert origin == r2
+    assert f"media-src 'self' {r2}" in csp
+    assert f"img-src 'self' data: {r2}" in csp
+
+    # 尾斜線不該產生 "…lol//videos/x.mp4"
+    _, origin = csp_and_config(r2 + "/")
+    assert origin == r2
+
+
 def test_bank_and_images_are_cacheable_at_the_edge(client):
     """公網上這是主要的頻寬防線。
 
@@ -239,3 +308,21 @@ def test_health_leaks_nothing_user_specific(anon_client):
     body = anon_client.get("/api/health").json()
     assert set(body) == {"ok", "schema_version", "decks"}
     assert set(body["decks"]["car"]) == {"version", "questions"}
+
+
+def test_app_starts_without_the_videos_directory(anon_client):
+    """影片不進 git（data/videos/ 在 .gitignore），所以「沒跑過影片 pipeline」是
+    全新 clone、CI 與 git worktree 的正常狀態。
+
+    StaticFiles 預設會對不存在的目錄在建構時 raise —— 那會讓 import app.main
+    整個失敗，而不是讓 /videos/* 404。實際踩過：99 個測試在 setup 就 error，
+    死因是 RuntimeError: Directory '.../data/videos' does not exist。
+    這個測試能通過本身就代表 app 在沒有影片的環境裡起得來。
+    """
+    from app.deck import DATA_DIR
+
+    # app.main 被 import 就會把目錄補出來，所以這裡驗的是「它確實補了」
+    assert (DATA_DIR / "videos").is_dir()
+    assert anon_client.get("/api/health").status_code == 200
+    # 缺席的影片要 404，不是 500
+    assert anon_client.get("/videos/nope.mp4").status_code == 404

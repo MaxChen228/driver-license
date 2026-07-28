@@ -28,6 +28,39 @@ uv run python tools/verify.py     # 題庫稽核，全綠才算數
 題庫改版時重跑 `tools/extract_{car,moto}.py` → `assemble.py` → `export_images.py`，再跑 verify。
 **題目內容留在 JSON、不進 DB**，所以覆蓋題庫不需要任何 migration。
 
+### 危險感知影片題
+
+| deck | 來源 | 題數 | 影片 |
+|---|---|---|---|
+| `hazard_car` | 1150605-危險感知影片題(調整影片順序).pdf | 10 | 10 |
+| `hazard_moto` | (中文)機車危險感知影片選擇題.pdf | 126 | 109 |
+
+每題綁一支情境影片。題目 schema 與筆試完全相同，只多 `video`（轉檔後的檔名）與
+`video_no`（公路局的影片編號）—— 所以 SRS、佇列、瀏覽、統計、離線快取整條路都不必改。
+
+126 題只對到 109 支影片：**有 17 題與另一題共用同一段情境**。輸出以「原始檔 md5 ＋
+轉檔參數」的雜湊命名，共用的題目因此指到同一個檔案（省 12% 流量，而且做完這題再做
+下一題時瀏覽器直接命中快取）。參數進雜湊是必要的：只用 md5 的話日後調 CRF 檔名不變，
+而這些檔案掛的是 immutable。
+
+**影片不進 git，也刻意不留離線副本** —— 來源是公路局公開檔案、轉檔可重現，
+這是快取不是資料。重建路徑（約 40 分鐘，其中下載 ~15 分、轉檔 ~25 分）：
+
+```bash
+uv run python tools/extract_hazard.py          # PDF → data/source/hazard_*.json（136 題）
+uv run python tools/fetch_hazard_videos.py     # → data/source/videos/  136 支 0.70 GB
+uv run python tools/transcode_hazard_videos.py # → data/videos/  238 個檔案 332,728,436 bytes
+uv run python tools/build_hazard_decks.py      # → data/hazard_*_questions.json
+```
+
+三支都可以中斷後重跑（已完成的會跳過）。預期產出：**119 mp4（323,255,497 bytes）
+＋ 119 jpg poster（9,472,939 bytes）**，`ops/upload_videos.sh` 會拿這組數字對帳。
+
+下載不需要瀏覽器：GET 分享頁時伺服器就在 `Set-Cookie` 給一枚
+`drive-sharing-<sharing_link>`，那正是 download API 要的 `sharing_token`；
+少了它一律回 `{"error":{"code":1002}}`。metadata 的 `hash` 欄**不是**內容的 md5
+（Synology 自己的同步雜湊，實測不符），完整性用 `size` 對帳。
+
 ## 學習模型
 
 移植自 kg，**不是** SM-2 / Leitner / FSRS：二元評分、乘法式間隔、單位小時、無 ease factor。
@@ -79,6 +112,12 @@ bash deploy/run-server.sh     # 本機（沒有 secrets 檔就是開發模式）
 | `DL_SECRETS_FILE` | `~/.secrets/driver-license.env` | 上面這些的來源，不進 repo |
 | `DL_TURNSTILE_SITEKEY` / `_SECRET` | 未設 | 兩個都設才啟用註冊的人機驗證。**只設 secret 會讓所有註冊拿到 400** |
 | `DL_LEGACY_USERNAME` | `max` | v1→v2 遷移時，既有進度掛到哪個帳號名下 |
+| `DL_VIDEO_ORIGIN` | 未設（＝同源 `/videos`） | 危險感知影片的來源。設成 `https://videos.wordnexus.lol` 就改由 R2 直出 |
+
+`DL_VIDEO_ORIGIN` 一個變數同時決定三件事，所以不能只改前端：`/api/config` 下發給
+前端組網址、**CSP 的 `media-src` 與 `img-src` 開這個口**、service worker 因跨來源
+而自動略過。少了 CSP 那半邊，`<video>` 會被擋成一塊放不出來的黑框，
+而**除了 console 以外沒有任何跡象**。
 
 啟動時會往 stderr 印一行 `driver-license: env=… docs=… turnstile=…`。
 secrets 檔漏了或 `DL_ENV` 打錯，就靠這行看出來。

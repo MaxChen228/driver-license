@@ -11,8 +11,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-DECKS = ("car", "moto")
-DECK_LABELS = {"car": "汽車", "moto": "機車"}
+
+# 危險感知是另一種題型（每題綁一支情境影片），但題目本身的 schema 與筆試完全相同，
+# 只多一個 video 欄位 —— 所以對 SRS、佇列、瀏覽、統計而言它就只是另外兩份題庫。
+DECKS = ("car", "moto", "hazard_car", "hazard_moto")
+DECK_LABELS = {
+    "car": "汽車",
+    "moto": "機車",
+    "hazard_car": "汽車危險感知",
+    "hazard_moto": "機車危險感知",
+}
 
 
 @dataclass(frozen=True)

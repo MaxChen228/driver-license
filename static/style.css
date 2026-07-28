@@ -470,6 +470,29 @@ main {
   border: 1px solid var(--color-divider);
 }
 
+/* 官方資源：擺在首頁最後，靠左排一欄 —— 它是出口不是入口，不該跟題庫搶視線 */
+.official {
+  margin-top: var(--space-6); padding-top: var(--space-6);
+  border-top: 2px solid var(--color-divider);
+  display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-2);
+}
+.official .muted { margin: var(--space-2) 0 0; }
+
+/* 危險感知的影片放在題幹「之前」：這類題目要先看完情境才讀得懂問題。
+   16:9 的框先佔好位子，影片載入時版面不會跳。 */
+#q-video { margin: 0 0 var(--space-4); }
+#q-video[hidden] { display: none; }
+#q-video video {
+  display: block; width: 100%; aspect-ratio: 16 / 9;
+  background: var(--color-text);   /* 未載入時是一塊墨色，不是破圖的灰 */
+  border: 1px solid var(--color-divider);
+}
+.vid-no {
+  margin: var(--space-2) 0 0;
+  font-size: 12px; font-weight: 600; letter-spacing: 0.04em;
+  color: color-mix(in srgb, var(--color-text) 60%, transparent);
+}
+
 #options { display: grid; gap: 0; margin-top: var(--space-6); }
 .opt {
   display: flex; align-items: center; gap: 0;

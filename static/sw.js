@@ -160,8 +160,28 @@ self.addEventListener("fetch", (e) => {
     return;
   }
 
+  // 危險感知影片：刻意「不」進 Cache Storage，只有 poster 進。
+  //
+  // 兩個理由，缺一個都不足以決定：
+  //   體積 —— 119 支影片 323 MB。跟著 shell 一起裝等於在使用者還沒決定要不要用
+  //           之前就吃掉半 GB；題目本身（1.5 MB）與題目圖（1.8 MB）是零負擔，
+  //           影片完全不是同一個量級，不能沿用同一套「整包收好」的做法。
+  //   Range  —— <video> 會發 Range 請求，回來的是 206 Partial Content，而
+  //           cache.put() 對 206 直接丟例外；Safari 更是一律走 Range。
+  //           要正確做離線影片，SW 必須自己抓完整檔（不帶 Range）存起來，
+  //           再在命中時自己切出 206 回去 —— 那是一個功能，不是一個分支。
+  //
+  // 目前靠 HTTP 層的 immutable（檔名是內容雜湊）處理重看，那已經足夠。
+  // 「下載離線影片包」要做的話是獨立的一步，屆時再在這裡加。
+  //
+  // 注意：影片搬到 R2 之後這段連跑都不會跑 —— 上面的跨來源 return 就先攔掉了，
+  // 連 poster 也不再進 Cache Storage（改由 HTTP 的 immutable 負責）。
+  // 這是可接受的：poster 一張 80 KB 上下，而且離線本來就播不了影片。
+  if (url.pathname.startsWith("/videos/") && !url.pathname.endsWith(".jpg")) return;
+
   // 題庫與圖片：快取優先。內容是靜態的，沒有新鮮度問題。
-  if (url.pathname.startsWith("/images/") || url.pathname.startsWith("/data/")) {
+  if (url.pathname.startsWith("/images/") || url.pathname.startsWith("/videos/")
+      || url.pathname.startsWith("/data/")) {
     e.respondWith(
       caches.open(ASSET_CACHE).then(async (cache) => {
         const hit = await cache.match(req);

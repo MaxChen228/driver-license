@@ -1,0 +1,311 @@
+{
+ "source": {
+  "title": "汽車危險感知影片題",
+  "version": "2d90e8eb",
+  "file": "1150605-危險感知影片題(調整影片順序).pdf",
+  "question_count": 10,
+  "extracted_with": "tools/extract_hazard.py → tools/build_hazard_decks.py"
+ },
+ "questions": [
+  {
+   "id": "HC0001",
+   "number": 1,
+   "answer": 1,
+   "stem": "對向的車輛持續顯示方向燈並未減速接近路口，你應該？",
+   "stem_is_image": false,
+   "options": [
+    {
+     "n": 1,
+     "text": "先減速，並確認安全後再行駛",
+     "is_image": false
+    },
+    {
+     "n": 2,
+     "text": "按鳴喇叭或變換燈光，提醒該車輛讓你先通過",
+     "is_image": false
+    },
+    {
+     "n": 3,
+     "text": "直行車優先，預判對方會讓我先行",
+     "is_image": false
+    }
+   ],
+   "images": [],
+   "video": "9ea21983d82b",
+   "video_no": "202601",
+   "architecture": "危險感知",
+   "category": "汽車危險感知影片",
+   "page": null
+  },
+  {
+   "id": "HC0002",
+   "number": 2,
+   "answer": 3,
+   "stem": "行經無號誌路口時，發現橫向有機車接近且未減速，你應該？",
+   "stem_is_image": false,
+   "options": [
+    {
+     "n": 1,
+     "text": "加速通過避免與對方衝突",
+     "is_image": false
+    },
+    {
+     "n": 2,
+     "text": "直行車優先，應預判對方會讓我先行",
+     "is_image": false
+    },
+    {
+     "n": 3,
+     "text": "減速並預作停車之準備",
+     "is_image": false
+    }
+   ],
+   "images": [],
+   "video": "3893c5d18ff7",
+   "video_no": "202602",
+   "architecture": "危險感知",
+   "category": "汽車危險感知影片",
+   "page": null
+  },
+  {
+   "id": "HC0003",
+   "number": 3,
+   "answer": 2,
+   "stem": "從照後鏡中發現有車輛接近並顯示方向燈，你應該？",
+   "stem_is_image": false,
+   "options": [
+    {
+     "n": 1,
+     "text": "加速駛離避免與對方衝突",
+     "is_image": false
+    },
+    {
+     "n": 2,
+     "text": "放開油門減速因應",
+     "is_image": false
+    },
+    {
+     "n": 3,
+     "text": "對方不一定會影響我，不必理會",
+     "is_image": false
+    }
+   ],
+   "images": [],
+   "video": "24fd60b01c0f",
+   "video_no": "202603",
+   "architecture": "危險感知",
+   "category": "汽車危險感知影片",
+   "page": null
+  },
+  {
+   "id": "HC0004",
+   "number": 4,
+   "answer": 1,
+   "stem": "綠燈起步時，發現橫向的車輛似乎沒有減速跡象，並快速逼近路口，你應該？",
+   "stem_is_image": false,
+   "options": [
+    {
+     "n": 1,
+     "text": "暫緩起步並煞停，確認該橫向車輛停下或通過後再行駛",
+     "is_image": false
+    },
+    {
+     "n": 2,
+     "text": "預判對方會於路口煞停，維持正常速度起步即可",
+     "is_image": false
+    },
+    {
+     "n": 3,
+     "text": "因為我是綠燈，應立即起步並按喇叭提醒對方停車",
+     "is_image": false
+    }
+   ],
+   "images": [],
+   "video": "0fe9d19f68d4",
+   "video_no": "202604",
+   "architecture": "危險感知",
+   "category": "汽車危險感知影片",
+   "page": null
+  },
+  {
+   "id": "HC0005",
+   "number": 5,
+   "answer": 2,
+   "stem": "請選出影片中的視線遮蔽處，可能會有車輛駛出？",
+   "stem_is_image": false,
+   "options": [
+    {
+     "n": 1,
+     "text": "人行道上的柱子",
+     "is_image": false
+    },
+    {
+     "n": 2,
+     "text": "對向車輛的後方",
+     "is_image": false
+    },
+    {
+     "n": 3,
+     "text": "路旁的停車",
+     "is_image": false
+    }
+   ],
+   "images": [],
+   "video": "70d47f8ceec7",
+   "video_no": "202605",
+   "architecture": "危險感知",
+   "category": "汽車危險感知影片",
+   "page": null
+  },
+  {
+   "id": "HC0006",
+   "number": 6,
+   "answer": 1,
+   "stem": "右轉時，路口的行人穿越道上有行人通行，你應該？",
+   "stem_is_image": false,
+   "options": [
+    {
+     "n": 1,
+     "text": "減速暫停讓行人先行",
+     "is_image": false
+    },
+    {
+     "n": 2,
+     "text": "保持速度，並在行人進入本車行駛路線前通過",
+     "is_image": false
+    },
+    {
+     "n": 3,
+     "text": "按鳴喇叭，提醒行人本車先行",
+     "is_image": false
+    }
+   ],
+   "images": [],
+   "video": "9aa86355b178",
+   "video_no": "202606",
+   "architecture": "危險感知",
+   "category": "汽車危險感知影片",
+   "page": null
+  },
+  {
+   "id": "HC0007",
+   "number": 7,
+   "answer": 3,
+   "stem": "路邊有行人可能會穿越道路，你應該？",
+   "stem_is_image": false,
+   "options": [
+    {
+     "n": 1,
+     "text": "按鳴喇叭或變換燈光以警示行人",
+     "is_image": false
+    },
+    {
+     "n": 2,
+     "text": "保持速度，直接閃避",
+     "is_image": false
+    },
+    {
+     "n": 3,
+     "text": "預先減速，讓行人先通行",
+     "is_image": false
+    }
+   ],
+   "images": [],
+   "video": "5fd28a9f00be",
+   "video_no": "202607",
+   "architecture": "危險感知",
+   "category": "汽車危險感知影片",
+   "page": null
+  },
+  {
+   "id": "HC0008",
+   "number": 8,
+   "answer": 1,
+   "stem": "行駛在高速公路上，右前方的車輛向左變換車道，你應該？",
+   "stem_is_image": false,
+   "options": [
+    {
+     "n": 1,
+     "text": "先判斷安全距離是否足夠，並預先減速",
+     "is_image": false
+    },
+    {
+     "n": 2,
+     "text": "不須理會，對方會自行判斷與本車的安全距離",
+     "is_image": false
+    },
+    {
+     "n": 3,
+     "text": "按鳴喇叭或連續變換燈光，提醒對方你要先行",
+     "is_image": false
+    }
+   ],
+   "images": [],
+   "video": "6227fc2cd284",
+   "video_no": "202608",
+   "architecture": "危險感知",
+   "category": "汽車危險感知影片",
+   "page": null
+  },
+  {
+   "id": "HC0009",
+   "number": 9,
+   "answer": 3,
+   "stem": "準備在路邊起駛時，你應該？",
+   "stem_is_image": false,
+   "options": [
+    {
+     "n": 1,
+     "text": "利用照後鏡確認後方沒有來車",
+     "is_image": false
+    },
+    {
+     "n": 2,
+     "text": "顯示方向燈",
+     "is_image": false
+    },
+    {
+     "n": 3,
+     "text": "以上皆是",
+     "is_image": false
+    }
+   ],
+   "images": [],
+   "video": "9a19f26ad7f1",
+   "video_no": "202609",
+   "architecture": "危險感知",
+   "category": "汽車危險感知影片",
+   "page": null
+  },
+  {
+   "id": "HC0010",
+   "number": 10,
+   "answer": 3,
+   "stem": "準備在路邊左轉彎時，你應該？",
+   "stem_is_image": false,
+   "options": [
+    {
+     "n": 1,
+     "text": "顯示方向燈",
+     "is_image": false
+    },
+    {
+     "n": 2,
+     "text": "確認行人穿越道線上沒有行人",
+     "is_image": false
+    },
+    {
+     "n": 3,
+     "text": "以上皆是",
+     "is_image": false
+    }
+   ],
+   "images": [],
+   "video": "0ae7f5e5792b",
+   "video_no": "202610",
+   "architecture": "危險感知",
+   "category": "汽車危險感知影片",
+   "page": null
+  }
+ ]
+}

@@ -311,23 +311,48 @@ function shuffled(a) {
   return x;
 }
 
+// 影片網址。CONFIG.video_origin 是空字串時走同源的 /videos（開發與內網），
+// 指到 R2 時就直出 —— 前端不必知道是哪一種，換後端不用改這裡。
+function videoUrl(key, ext) {
+  return `${CONFIG.video_origin || ""}/videos/${key}.${ext}`;
+}
+
+// 官方資源。這個 app 是拿公路局公告的題庫做的複習工具，不是監理所的一部分 ——
+// 把正本擺在看得到的地方，使用者要對答案、要正式模擬考時知道去哪。
+// rel="noopener" 是必須的：少了它，被開的分頁能透過 window.opener 改寫這一頁。
+const OFFICIAL_LINKS = `
+  <section class="official">
+    <p class="kicker">官方資源</p>
+    <a class="btn btn-secondary" href="https://www.mvdis.gov.tw/m3-simulator-drv/index"
+       target="_blank" rel="noopener noreferrer">監理服務網　線上模擬考</a>
+    <a class="btn btn-secondary" href="https://hpt.thb.gov.tw/"
+       target="_blank" rel="noopener noreferrer">公路局　機車危險感知教育平台</a>
+    <p class="muted">題庫與影片皆為交通部公路局公告內容，本站僅作複習之用。</p>
+  </section>`;
+
 // ── 首頁 ──────────────────────────────────────────────
 // 要考哪一種：null = 還沒選過、"car"／"moto" = 只顯示那一副、"both" = 兩副都顯示。
 // 原本首頁永遠並列汽車與機車，但一個人不會同時去考兩種 —— 每次進首頁都要掃
 // 兩組數字、按對其中一半的按鈕。存在裝置本機：這是顯示偏好，不是進度。
 let FOCUS = null;
 
+// 危險感知是「同一種車的另一份題庫」（deck key 就是 hazard_<車種>），所以
+// 「你要考哪一種」問的是車種，不是題庫 —— 只留 car 而把 hazard_car 藏起來的話,
+// 等於藏掉考汽車的人一樣要考的那一份。
+const vehicleOf = (deck) => deck.replace(/^hazard_/, "");
+
 function renderHome() {
   if (!FOCUS) return renderDeckChooser();
   const decks = FOCUS === "both"
     ? CONFIG.decks
-    : CONFIG.decks.filter((d) => d.deck === FOCUS);
+    : CONFIG.decks.filter((d) => vehicleOf(d.deck) === FOCUS);
 
   $("#view-home").innerHTML =
     decks.map((d) => deckCard(d, counts(d.deck))).join("") +
     (SNAP.paused
       ? `<p class="home-note tag tag-accent">${ico("pause", "ico ico-sm")}時鐘已凍結 —— 到期時間不會推進</p>`
-      : "");
+      : "") +
+    OFFICIAL_LINKS;
 
   $("#view-home").querySelectorAll("[data-start]").forEach((b) =>
     b.addEventListener("click", () =>
@@ -390,13 +415,20 @@ function deckCard(d, c) {
 function renderDeckChooser() {
   // 包一層並跨滿欄：#view-home 在 ≥820px 是兩欄網格（給兩張 deck 卡用的），
   // 不包的話標題、說明、按鈕會被拆進左右兩欄，說明文字飄到右邊去。
+  // 以車種為單位，不是以題庫 —— 汽車那顆包含「汽車」與「汽車危險感知」兩份。
+  const vehicles = [...new Set(CONFIG.decks.map((d) => vehicleOf(d.deck)))];
+  const label = (v) => (CONFIG.decks.find((d) => d.deck === v) || {}).label || v;
+  const total = (v) => CONFIG.decks
+    .filter((d) => vehicleOf(d.deck) === v)
+    .reduce((n, d) => n + d.total, 0);
+
   $("#view-home").innerHTML = `
     <div class="chooser-wrap">
       <div class="sec">你要考哪一種</div>
-      <p class="muted">只決定首頁顯示哪一副題庫，設定頁隨時可以改。</p>
+      <p class="muted">只決定首頁顯示哪幾份題庫（含該車種的危險感知），設定頁隨時可以改。</p>
       <div class="chooser">
-        ${CONFIG.decks.map((d) => `<button class="btn btn-primary btn-lg btn-block" data-focus="${d.deck}">
-          <span>${esc(d.label)}</span><span class="btn-count">${d.total} 題</span></button>`).join("")}
+        ${vehicles.map((v) => `<button class="btn btn-primary btn-lg btn-block" data-focus="${v}">
+          <span>${esc(label(v))}</span><span class="btn-count">${total(v)} 題</span></button>`).join("")}
         <button class="btn btn-secondary btn-block" data-focus="both">
           <span>兩種都要</span></button>
       </div>
@@ -491,6 +523,18 @@ function loadCard() {
   const stemIsImage = q.stem_is_image || !q.stem;
   $("#q-stem").textContent = stemIsImage ? "依下圖作答" : q.stem;
   $("#q-stem").className = stemIsImage ? "is-fallback" : "";
+
+  // 危險感知題：先看影片再作答。preload="none" 是刻意的 —— 一份題庫上百支影片，
+  // 預載會在使用者還沒決定要看之前就把行動網路吃掉；poster 讓未播放的畫面
+  // 不是一塊空白（iOS 尤其明顯）。playsinline 擋掉 iOS 自動全螢幕接管。
+  const vbox = $("#q-video");
+  vbox.hidden = !q.video;
+  vbox.innerHTML = q.video
+    ? `<video controls playsinline preload="none" poster="${videoUrl(q.video, "jpg")}">
+         <source src="${videoUrl(q.video, "mp4")}" type="video/mp4">
+       </video>
+       <p class="vid-no">影片 ${esc(q.video_no || "")}</p>`
+    : "";
 
   // 題幹是圖的題目（汽車 95 題、機車 126 題）沒有文字題幹，圖就是題目本身
   const stemImgs = q.options.some((o) => o.is_image) ? [] : q.images;
@@ -836,8 +880,12 @@ function rowHtml(q) {
     ? `<span class="tag tag-accent trail">錯 ${st.lapse_count}</span>` : "";
   // 圖片題在清單裡只剩「（圖片題）」四個字，等於認不出來。放張縮圖，
   // 圖本來就已經在 Cache Storage 裡，lazy 載入不花任何網路。
-  const thumb = q.images && q.images.length
-    ? `<img class="thumb" src="/${q.images[0].file}" alt="" loading="lazy" decoding="async">` : "";
+  // 危險感知題同理，用影片的 poster —— 那張圖 30 KB 上下，比影片便宜三個數量級。
+  const thumbSrc = q.video
+    ? videoUrl(q.video, "jpg")
+    : q.images && q.images.length ? `/${q.images[0].file}` : "";
+  const thumb = thumbSrc
+    ? `<img class="thumb" src="${thumbSrc}" alt="" loading="lazy" decoding="async">` : "";
   return `<button class="row" data-id="${q.id}">
     <span class="dot ${stateOf(q.id)}" title="${STATE_LABEL[stateOf(q.id)]}"></span>
     <span class="sr-only">${STATE_LABEL[stateOf(q.id)]}</span>
@@ -1113,11 +1161,13 @@ async function renderSettings() {
     </div>
     <div class="set-block">
       <h3>首頁顯示</h3>
-      <p>一個人通常只考一種。這只影響首頁與題庫／統計頁的預設題庫，兩副的進度都留著。</p>
+      <p>一個人通常只考一種。這只影響首頁與題庫／統計頁的預設，每一份題庫的進度都留著。
+      選了車種就會一起顯示該車種的危險感知題庫。</p>
       <select id="set-focus" class="input">${
-        CONFIG.decks.map((d) =>
-          `<option value="${d.deck}" ${FOCUS === d.deck ? "selected" : ""}>只看${esc(d.label)}</option>`
-        ).join("")
+        [...new Set(CONFIG.decks.map((d) => vehicleOf(d.deck)))].map((v) => {
+          const label = (CONFIG.decks.find((d) => d.deck === v) || {}).label || v;
+          return `<option value="${v}" ${FOCUS === v ? "selected" : ""}>只看${esc(label)}</option>`;
+        }).join("")
       }<option value="both" ${FOCUS === "both" ? "selected" : ""}>兩種都顯示</option></select>
     </div>
     <div class="set-block">
