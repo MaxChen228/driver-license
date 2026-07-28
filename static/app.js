@@ -380,7 +380,12 @@ function loadCard() {
   $("#progress-text").textContent = `${S.i + 1} / ${S.ids.length}　·　${q.category}`;
   $("#btn-shuffle").disabled = S.ids.length - S.i < 2;
   $("#q-meta").textContent = `${q.id}　${q.architecture}`;
-  $("#q-stem").textContent = q.stem;
+  // 圖片題（汽車 95、機車 126）沒有文字題幹，畫面上半部就完全沒有「要回答什麼」。
+  // 補一行提示，但樣式刻意跟真題幹拉開兩級（見 style.css 的 .is-fallback）——
+  // 這個題庫的價值在於逐字元對帳過，混進一句我們自己寫的話不能看起來像題目本文。
+  const stemIsImage = q.stem_is_image || !q.stem;
+  $("#q-stem").textContent = stemIsImage ? "依下圖作答" : q.stem;
+  $("#q-stem").className = stemIsImage ? "is-fallback" : "";
 
   // 題幹是圖的題目（汽車 95 題、機車 126 題）沒有文字題幹，圖就是題目本身
   const stemImgs = q.options.some((o) => o.is_image) ? [] : q.images;
@@ -407,7 +412,7 @@ function loadCard() {
   $("#q-warn").hidden = !(st && st.lapse_count);
 
   $("#verdict").hidden = true;
-  $("#btn-next").hidden = true;
+  $("#next-bar").hidden = true;
   $("#btn-guessed").hidden = false;
   $("#note").value = SNAP.notes.get(id) || "";
   $("#note-status").textContent = "";
@@ -450,6 +455,10 @@ async function submit(chosen, guessed = false) {
   S.now = now;
   S.eventId = ev.client_event_id;
 
+  // 答錯給一下短震動。手機上的即時回饋目前只有顏色變化，而這是一天會遇到
+  // 上百次的那個瞬間。答對不震 —— 對的事情不需要打斷你。
+  if (!correct && navigator.vibrate) navigator.vibrate(30);
+
   paintVerdict({ correct, answer: q.answer, remembered, ...after }, chosen);
   paintNet();
   syncSoon();
@@ -468,12 +477,30 @@ function paintVerdict(r, chosen) {
   v.className = r.correct ? "" : "bad";
   $("#verdict-icon").innerHTML = `<use href="#i-${r.correct ? "check" : "x"}"></use>`;
   $("#verdict-icon").style.color = r.correct ? "" : "var(--color-accent)";
+  // 原本還接一句「（間隔 2.5 天）」—— 跟前面的「3 天後」是同一件事的兩種單位，
+  // 連著兩個括號。間隔屬於演算法的內部量，設定頁的「複習節奏」已經完整交代。
   $("#verdict-sched").textContent =
-    `下次複習：${fmtDue(r.next_review_at)}（間隔 ${fmtHours(r.interval_hours)}）` +
+    `下次複習：${fmtDue(r.next_review_at)}` +
     (r.correct ? "" : `　·　累計答錯 ${r.lapse_count} 次`);
   $("#btn-guessed").hidden = !r.correct || !r.remembered;
   $("#verdict").hidden = false;
-  $("#btn-next").hidden = false;
+  $("#next-bar").hidden = false;
+  ensureVisible($("#verdict"));
+}
+
+// 判定出現後把它捲進畫面 —— 只補不足的那一段，不重新定位整頁（使用者的視線
+// 本來就停在他剛剛按下的那個選項上，整頁跳動比不捲更糟）。
+// 底部要扣掉 sticky 的下一題列，否則判定會剛好被它蓋掉。
+// 刻意用 behavior:"auto"（瞬移）而不是 "smooth"。實測在這個頁面上 smooth 是
+// 完全的 no-op：同一個位置 `scrollBy({top:100, behavior:'smooth'})` 之後
+// scrollY 仍是 0，換成 'auto' 就是 100 —— 而且不會有任何錯誤。這個修正的
+// 全部意義就是「使用者不必自己捲」，不能建立在一個會安靜失效的動畫上。
+// 瞬移在這裡也比較誠實：使用者剛按下答案，要的是立刻看到結果。
+function ensureVisible(el) {
+  const limit = window.innerHeight - $("#next-bar").offsetHeight - 8;
+  const bottom = el.getBoundingClientRect().bottom;
+  if (bottom <= limit) return;
+  window.scrollBy({ top: bottom - limit, behavior: "auto" });
 }
 
 // 「我是猜的」＝ 把上一次作答改判為 forgot，不是再送一次作答
@@ -1208,7 +1235,9 @@ function fmtDue(iso) {
   const date = dt.toLocaleString("zh-TW", { month: "numeric", day: "numeric" });
   if (days <= 0) return `今天 ${time}`;
   if (days === 1) return `明天 ${time}`;
-  return `${date} ${time}（${days} 天後）`;
+  // 兩天以上不印時刻。「7/31 上午12:08」的那個時刻是乘出來的，沒有人會為它
+  // 定鬧鐘，印出來只會讓人以為那是個約定；使用者要的是「還有幾天」。
+  return `${days} 天後（${date}）`;
 }
 
 document.querySelectorAll("[data-nav]").forEach((b) =>

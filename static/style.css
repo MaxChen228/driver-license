@@ -430,6 +430,14 @@ main {
   letter-spacing: -0.005em;
 }
 #q-stem:empty { display: none; }
+/* 圖片題沒有文字題幹（汽車 95 題、機車 126 題），畫面上半部因此完全沒有
+   「要回答什麼」。補一行提示，但**必須看起來不像題目本文** —— 這個題庫的
+   價值就在於逐字元對帳過，混進一句我們自己寫的話會毀掉那個保證。
+   所以用 muted 的小字，與 20px 粗體的真題幹拉開兩級。 */
+#q-stem.is-fallback {
+  font-size: 15px; font-weight: 400;
+  color: color-mix(in srgb, var(--color-text) 65%, transparent);
+}
 
 /* 圖片題的圖就是題目本身 —— 置中，否則卡片重心整個偏左。
    不套 .grayscale：交通標誌的顏色帶有題意（紅=禁制、藍=指示）。 */
@@ -517,7 +525,35 @@ main {
 #note-box textarea { margin-top: var(--space-3); }
 #note-status { margin: 6px 0 0; font-size: 12px; color: color-mix(in srgb, var(--color-text) 55%, transparent); }
 
-#btn-next { margin-top: var(--space-6); }
+/* 桌機快捷鍵提示：只有真的有實體指標（滑鼠／觸控板 → 多半也有鍵盤）
+   而且寬度夠時才出現。觸控裝置顯示它只是浪費一行。 */
+#kbd-hint { display: none; }
+@media (pointer: fine) and (min-width: 700px) {
+  #kbd-hint {
+    display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-4);
+    margin-top: var(--space-4);
+    padding-top: var(--space-2);
+    border-top: 1px solid var(--color-rule);
+  }
+}
+
+/* sticky 的下一題列。bottom 要吃 safe-area，否則在有 home indicator 的機型上
+   按鈕會壓在那條橫線底下。containing block 是 #view-session，所以捲到內容
+   末端時它會自然停回原位，不會永遠浮著。 */
+#next-bar {
+  position: sticky;
+  bottom: max(env(safe-area-inset-bottom), 0px);
+  z-index: 10;
+  margin-top: var(--space-6);
+  padding: var(--space-3) 0 calc(var(--space-3) + env(safe-area-inset-bottom));
+  background: var(--color-bg);
+  border-top: var(--rule-strong) solid var(--color-divider);
+}
+/* 必須在它後面留下一段等高的可捲空間。sticky 的語義是「自然位置落到視窗底部
+   以下時，往上拉到底部」—— 短卡片的整頁本來就捲不動，那一拉就直接蓋在判定上，
+   而且使用者捲不出來（沒有可捲的距離）。留了這段之後，捲到底時它會停回自然
+   位置，被蓋住的內容一定露得出來。高度＝btn-lg 56 + 上下 padding 24 + 2px 線。 */
+#view-session { padding-bottom: 82px; }
 
 /* ── done ───────────────────────────────────────────────────────────── */
 /* 系統的「海報式陳述」：紅色鋪成整片，字體放到 display 級，靠左 */

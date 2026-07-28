@@ -74,6 +74,13 @@
       <div id="q-images"></div>
       <div id="options"></div>
 
+      <!-- 快捷鍵確實有實作，但介面上一個字都沒說 —— 桌機使用者永遠不會發現。
+           貼著選項下方，因為 1–3 指的就是上面那三格；放在頁尾會被 sticky 的
+           下一題列蓋住，等於沒放。只在真的有實體指標時出現，見 style.css。 -->
+      <p id="kbd-hint" class="kicker">
+        <span>1–3 作答</span><span>空白鍵 下一題</span><span>G 我是猜的</span><span>S 洗牌</span>
+      </p>
+
       <div id="verdict" hidden>
         <div id="verdict-head">
           <svg class="ico" id="verdict-icon"><use href="#i-check"></use></svg>
@@ -90,9 +97,16 @@
       </details>
     </article>
 
-    <button id="btn-next" class="btn btn-primary btn-block btn-lg" hidden>
-      下一題<svg class="ico btn-trail"><use href="#i-right"></use></svg>
-    </button>
+    <!-- 「下一題」是這個 app 按最多次的按鈕，卻長在題目與判定的下面 ——
+         題幹一長就整顆落在摺線外，每答一題都要先手動捲一次。改成 sticky：
+         自然位置在畫面外時貼著視窗底部，捲到底才回到它原本的位置。
+         包一層 bar 而不是直接 sticky 按鈕：需要不透明底色與上緣分隔線，
+         否則捲動的內容會從按鈕周圍透出來。 -->
+    <div id="next-bar" hidden>
+      <button id="btn-next" class="btn btn-primary btn-block btn-lg">
+        下一題<svg class="ico btn-trail"><use href="#i-right"></use></svg>
+      </button>
+    </div>
   </section>
 
   <!-- ── 完成 ───────────────────────────────────────────── -->
