@@ -152,7 +152,7 @@ def test_legacy_progress_lands_on_one_account(tmp_path):
     assert users == [(1, "legacy-owner", None, None)]
 
 
-def test_seeded_empty_cards_are_dropped_but_real_progress_is_byte_identical(migrated):
+def test_seeded_empty_cards_are_dropped_and_progress_is_replayed_to_current_policy(migrated):
     _, connect = migrated
     conn = connect()
     rows = conn.execute(
@@ -162,8 +162,14 @@ def test_seeded_empty_cards_are_dropped_but_real_progress_is_byte_identical(migr
     ).fetchall()
     # C0002 只有 seed 預設值，沒有資訊量，不搬
     assert [r[1] for r in rows] == ["C0001", "M0001"]
-    assert rows[0] == (1, *V1_CARDS[0])
-    assert rows[1] == (1, *V1_CARDS[1])
+    assert rows[0] == (
+        1, "C0001", "car", 235.2, "2026-07-29T21:12:00+00:00",
+        "2026-07-20T02:00:00+00:00", 2, 0, 2, 1,
+    )
+    assert rows[1] == (
+        1, "M0001", "moto", 4.0, "2026-07-20T07:00:00+00:00",
+        "2026-07-20T03:00:00+00:00", 1, 1, 0, 0,
+    )
 
 
 def test_events_keep_their_ids_and_order(migrated):
@@ -177,7 +183,7 @@ def test_events_keep_their_ids_and_order(migrated):
     assert [r[0] for r in rows] == [1, 2, 3]
     assert all(r[1] == 1 for r in rows)
     assert [r[3] for r in rows] == ["ev-1", "ev-2", None]
-    assert rows[1][4:] == (60.0, 150.0)
+    assert rows[1][4:] == (168.0, 235.2)
 
 
 def test_notes_and_settings_move_to_the_account(migrated):
@@ -295,7 +301,7 @@ def test_regrade_still_works_on_migrated_events(migrated):
     client, _ = migrated
     r = client.post("/api/answer/regrade", json={"card_id": "C0001"})
     assert r.status_code == 200
-    # 用 ev-2 的 before 快照回捲：60 × 0.35 = 21，review_count 仍是 2（不是 3）。
+    # 用 ev-2 的 before 快照回捲：168 × 0.35 = 58.8，review_count 仍是 2（不是 3）。
     # 0.35 是 intensive 的 forgot_mult —— 這個數字同時證明遷移過來的 preset 真的生效了。
-    assert r.json()["interval_hours"] == 21.0
+    assert r.json()["interval_hours"] == 58.8
     assert r.json()["review_count"] == 2

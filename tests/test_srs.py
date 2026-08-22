@@ -65,13 +65,13 @@ def test_first_review_uses_initial_as_base_ignoring_stored_interval():
     s = CardState(review_interval_hours=999.0, next_review_at=None, last_reviewed_at=None,
                   review_count=0, lapse_count=0, review_streak=0, last_review_feedback=-1)
     after = apply_feedback(s, True, RELAXED, NOW)
-    assert after.review_interval_hours == 60.0  # 24 × 2.5，不是 999 × 2.5
+    assert after.review_interval_hours == 168.0  # 第一次就答對：直接排到 7 天後
 
 
 def test_next_review_is_measured_from_answer_time():
     s = CardState.fresh(RELAXED)
     after = apply_feedback(s, True, RELAXED, NOW)
-    assert after.next_review_at == NOW + timedelta(hours=60)
+    assert after.next_review_at == NOW + timedelta(hours=168)
 
 
 def test_streak_and_lapse_transitions():
@@ -87,13 +87,13 @@ def test_streak_and_lapse_transitions():
 
 
 def test_forgot_keeps_accumulated_strength():
-    """連續答對排到 150h 的卡答錯後回到 75h，不會被打回新卡的 24h。"""
+    """連續答對排到 1050h 的卡答錯後回到 525h，不會被打回新卡的 24h。"""
     s = CardState.fresh(RELAXED)
     for _ in range(3):
         s = apply_feedback(s, True, RELAXED, NOW)
-    assert s.review_interval_hours == 375.0  # 24→60→150→375
+    assert s.review_interval_hours == 1050.0  # 168→420→1050
     s = apply_feedback(s, False, RELAXED, NOW)
-    assert s.review_interval_hours == 187.5
+    assert s.review_interval_hours == 525.0
     assert s.review_count == 4  # 仍是複習卡，不是新卡
 
 

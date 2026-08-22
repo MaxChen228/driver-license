@@ -16,10 +16,14 @@ from app import db, srs
 
 def _answer(client, deck="car", correct=True):
     cid = client.get("/api/queue/unlearned", params={"deck": deck}).json()["card_ids"][0]
+    return cid, _answer_card(client, cid, correct)
+
+
+def _answer_card(client, cid, correct=True):
     card = client.get(f"/api/card/{cid}").json()
     right = card["question"]["answer"]
     chosen = right if correct else next(x for x in (1, 2, 3) if x != right)
-    return cid, client.post("/api/answer", json={"card_id": cid, "chosen": chosen}).json()
+    return client.post("/api/answer", json={"card_id": cid, "chosen": chosen}).json()
 
 
 def test_switching_to_custom_seeds_from_the_current_preset(client):
@@ -40,8 +44,10 @@ def test_custom_multipliers_take_effect_on_the_next_answer(client):
         "custom_params": {"base": "relaxed", "remembered_mult": 2.0, "forgot_mult": 0.25}
     })
 
-    _, r = _answer(client, correct=True)
-    assert r["interval_hours"] == 48.0     # 24（relaxed 的首次）× 2.0
+    cid, r = _answer(client, correct=True)
+    assert r["interval_hours"] == 168.0    # 第一次就答對：先排到 7 天後
+    r = _answer_card(client, cid, correct=True)
+    assert r["interval_hours"] == 336.0    # 後續從 168h 繼續 ×2.0
     _, r = _answer(client, correct=False)
     assert r["interval_hours"] == 6.0      # 24 × 0.25 = 6，正好在下限上
 
@@ -82,7 +88,9 @@ def test_changing_multipliers_does_not_rewrite_history(client):
         "custom_params": {"base": "relaxed", "remembered_mult": 2.0, "forgot_mult": 0.5}
     })
     cid, r = _answer(client, correct=True)
-    assert r["interval_hours"] == 48.0
+    assert r["interval_hours"] == 168.0
+    r = _answer_card(client, cid, correct=True)
+    assert r["interval_hours"] == 336.0
 
     # 換一組完全不同的倍率
     client.put("/api/settings", json={
@@ -94,12 +102,12 @@ def test_changing_multipliers_does_not_rewrite_history(client):
         assert cfg.remembered_mult == 1.1            # 新設定確實生效了
         state = db.rebuild_card(conn, 1, cid, "car", cfg)
 
-    # 舊事件用的是它當時那組（×2.0），重算後仍然是 48 小時 —— 沒有被改寫
-    assert state.review_interval_hours == 48.0
+    # 第二筆舊事件用的是它當時那組（×2.0），重算後仍然是 336 小時 —— 沒有被改寫
+    assert state.review_interval_hours == 336.0
 
-    # 而下一題（新事件）用的是新倍率
-    _, r2 = _answer(client, correct=True)
-    assert r2["interval_hours"] == pytest.approx(24.0 * 1.1)
+    # 而下一筆新事件用的是新倍率
+    r2 = _answer_card(client, cid, correct=True)
+    assert r2["interval_hours"] == pytest.approx(336.0 * 1.1)
 
 
 def test_event_carries_the_values_in_force_at_the_time(client):

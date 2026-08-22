@@ -40,7 +40,7 @@ def test_merging_an_empty_account_reproduces_the_local_history(client):
 
     st = next(s for s in out["states"] if s["id"] == CARD)
     assert st["review_count"] == 3
-    assert st["interval_hours"] == 375.0        # 24 × 2.5³
+    assert st["interval_hours"] == 1050.0       # 168 × 2.5²
     assert out["notes"][CARD] == "匿名時寫的筆記"
 
 
@@ -58,8 +58,8 @@ def test_merging_interleaves_with_history_the_account_already_has(tmp_path_facto
 
     st = next(s for s in out["states"] if s["id"] == CARD)
     assert st["review_count"] == 3
-    # 三筆照時間序摺疊 = 375，而不是「接在後面」的結果
-    assert st["interval_hours"] == 375.0
+    # 三筆照時間序摺疊 = 1050，而不是「接在後面」的結果
+    assert st["interval_hours"] == 1050.0
 
 
 def test_merging_twice_is_a_no_op(client):

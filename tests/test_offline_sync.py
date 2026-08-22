@@ -65,9 +65,9 @@ def test_sync_applies_offline_answers_and_returns_fresh_state(client):
 
     assert r["sync"]["applied"] == ["e1"]
     st = next(s for s in r["states"] if s["id"] == cid)
-    assert st["interval_hours"] == 60.0
+    assert st["interval_hours"] == 168.0
     # 到期時間必須從「當初作答的時刻」起算，不是從補送的時刻
-    assert st["next_review_at"].startswith("2026-07-22T14:00")
+    assert st["next_review_at"].startswith("2026-07-27T02:00")
     assert r["notes"][cid] == "離線寫的筆記"
 
 
@@ -84,7 +84,7 @@ def test_duplicate_client_event_id_is_counted_once(client):
 
     st = next(s for s in second["states"] if s["id"] == cid)
     assert st["review_count"] == 1          # 不是 2
-    assert st["interval_hours"] == 60.0     # 不是 150（60 × 2.5）
+    assert st["interval_hours"] == 168.0    # 不是 420（168 × 2.5）
 
     # 走 /api/answer 這條路也要擋
     assert client.post("/api/answer", json={**ev}).status_code == 409
@@ -93,9 +93,8 @@ def test_duplicate_client_event_id_is_counted_once(client):
 def test_replay_order_follows_reviewed_at_not_arrival_order(client):
     """同一張卡答兩次，先後不同結果就不同 —— 順序錯了間隔就錯了。
 
-    先答對（24×2.5=60）再答錯（60×0.5=30）。若順序反過來會是
-    先錯（24×0.5=12）再對（12×2.5=30）—— 這裡碰巧同為 30，所以改用
-    streak/lapse 與 last_feedback 來辨別，它們不對稱。
+    先答對（168）再答錯（168×0.5=84）。若順序反過來會是
+    先錯（24×0.5=12）再對（12×2.5=30）。
     """
     cid = "C0003"
     correct = _answer_for(client, cid)
@@ -115,7 +114,7 @@ def test_replay_order_follows_reviewed_at_not_arrival_order(client):
     assert st["review_count"] == 2
     assert st["last_feedback"] == 0               # 最後一筆是答錯
     assert st["streak"] == 0 and st["lapse_count"] == 1
-    assert st["interval_hours"] == 30.0           # 60 × 0.5
+    assert st["interval_hours"] == 84.0           # 168 × 0.5
 
 
 def test_offline_answers_keep_their_own_day_keys(client):

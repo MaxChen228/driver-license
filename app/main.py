@@ -632,7 +632,7 @@ def regrade(payload: RegradeIn, user: sqlite3.Row = CurrentUser):
     """把「上一次作答」改判為 forgot（前端的「我是猜的」）。
 
     不是再送一次 answer —— 那會被當成第二次作答，從已經放大的間隔再乘 0.5，
-    數字會錯（60h → 30h，而不是應有的 12h），review_count 也會多一次。
+    數字會錯（168h → 84h，而不是應有的 12h），review_count 也會多一次。
     這裡先用事件裡的 before 快照把卡片精確回捲，刪掉該事件，再以 forgot 重打一次。
     """
     q = _question(payload.card_id)

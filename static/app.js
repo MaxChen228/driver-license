@@ -720,7 +720,7 @@ function ensureVisible(el) {
 }
 
 // 「我是猜的」＝ 把上一次作答改判為 forgot，不是再送一次作答
-// （再送會從已放大的間隔再乘 0.5，60h → 30h 而不是應有的 12h，review_count 也會多一次）。
+// （再送會從已放大的間隔再乘 0.5，168h → 84h 而不是應有的 12h，review_count 也會多一次）。
 $("#btn-guessed").addEventListener("click", async () => {
   if (!S || !S.answered) return;
   const q = question(S.cardId);
@@ -1227,11 +1227,10 @@ function customMultRow(p, off) {
   const r = (CONFIG.mult_range || {});
   const rr = r.remembered || srs.REMEMBERED_MULT_RANGE;
   const fr = r.forgot || srs.FORGOT_MULT_RANGE;
-  // 直接把數字換算成「這張卡下次會排到多久」—— ×1.4 對一般人不是一個有感覺的
-  // 量，而「8 小時 → 11 小時」是。用首次間隔當基準，因為那是每張新卡的實際起點。
-  const preview = (mult) => fmtHours(
-    Math.min(p.max_hours, Math.max(p.min_hours, p.initial_hours * mult))
-  );
+  // 直接把數字換算成「下一次會排到多久」—— ×1.4 對一般人不是一個有感覺的量。
+  // 答對倍率現在從「第一次就會」的 7 天繼續乘；答錯仍用 preset 的初始間隔當基準。
+  const okBase = srs.FIRST_REMEMBERED_HOURS;
+  const preview = (base, mult) => fmtHours(Math.min(p.max_hours, Math.max(p.min_hours, base * mult)));
   return `
     <div class="mults">
       <label class="mult">
@@ -1239,14 +1238,14 @@ function customMultRow(p, off) {
         <input id="set-mult-ok" class="input" type="number" inputmode="decimal"
                min="${rr[0]}" max="${rr[1]}" step="0.05" value="${p.remembered_mult}"
                ${off ? "disabled" : ""}>
-        <span class="mult-note">${fmtHours(p.initial_hours)} → ${preview(p.remembered_mult)}</span>
+        <span class="mult-note">${fmtHours(okBase)} → ${preview(okBase, p.remembered_mult)}</span>
       </label>
       <label class="mult">
         <span class="field-label">答錯 ×</span>
         <input id="set-mult-bad" class="input" type="number" inputmode="decimal"
                min="${fr[0]}" max="${fr[1]}" step="0.05" value="${p.forgot_mult}"
                ${off ? "disabled" : ""}>
-        <span class="mult-note">${fmtHours(p.initial_hours)} → ${preview(p.forgot_mult)}</span>
+        <span class="mult-note">${fmtHours(p.initial_hours)} → ${preview(p.initial_hours, p.forgot_mult)}</span>
       </label>
     </div>
     <p class="muted set-hint">改了立刻生效，只影響之後的作答 ——
@@ -1263,7 +1262,8 @@ async function renderSettings() {
     <div class="set-block">
       <h3>複習節奏</h3>
       <dl class="kv">
-        <div><dt>首次</dt><dd>${fmtHours(p.initial_hours)}</dd></div>
+        <div><dt>首答對</dt><dd>${fmtHours(srs.FIRST_REMEMBERED_HOURS)}</dd></div>
+        <div><dt>首答錯</dt><dd>${fmtHours(Math.min(p.max_hours, Math.max(p.min_hours, p.initial_hours * p.forgot_mult)))}</dd></div>
         <div><dt>答對</dt><dd>×${p.remembered_mult}</dd></div>
         <div><dt>答錯</dt><dd>×${p.forgot_mult}</dd></div>
         <div><dt>範圍</dt><dd>${fmtHours(p.min_hours)}–${fmtHours(p.max_hours)}</dd></div>

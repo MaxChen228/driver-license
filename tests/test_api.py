@@ -44,7 +44,7 @@ def test_queue_unlearned_then_answer_moves_card_out(client):
 
     r = client.post("/api/answer", json={"card_id": cid, "chosen": correct}).json()
     assert r["correct"] is True and r["remembered"] is True
-    assert r["interval_hours"] == 60.0  # relaxed 首答答對：24 × 2.5
+    assert r["interval_hours"] == 168.0  # 第一次就答對：直接排到 7 天後
 
     assert client.get("/api/queue/unlearned", params={"deck": "car"}).json()["count"] == 1089
     assert client.get(f"/api/card/{cid}").json()["state"] == "reviewed"
@@ -76,13 +76,13 @@ def test_guessed_overrides_a_correct_answer_to_forgot(client):
 def test_regrade_rewinds_instead_of_double_counting(client):
     """答完才按「我是猜的」：必須改判上一次，不是再記一次。
 
-    再送一次的話會從已放大的 60h 再乘 0.5 得到 30h，且 review_count 變 2 —— 都是錯的。
+    再送一次的話會從已放大的 168h 再乘 0.5 得到 84h，且 review_count 變 2 —— 都是錯的。
     """
     cid = client.get("/api/queue/unlearned", params={"deck": "car"}).json()["card_ids"][-1]
     correct = client.get(f"/api/card/{cid}").json()["question"]["answer"]
 
     first = client.post("/api/answer", json={"card_id": cid, "chosen": correct}).json()
-    assert first["interval_hours"] == 60.0
+    assert first["interval_hours"] == 168.0
 
     r = client.post("/api/answer/regrade", json={"card_id": cid}).json()
     assert r["remembered"] is False
@@ -296,7 +296,7 @@ def test_health_needs_no_auth_and_reports_schema_and_banks(anon_client):
     body = r.json()
     assert body["ok"] is True
     # 遷移真的跑完了才算健康；部署腳本比對的就是這個數字
-    assert body["schema_version"] == 4
+    assert body["schema_version"] == 5
     assert body["decks"]["car"]["questions"] == 1090
     assert body["decks"]["moto"]["questions"] == 806
     # 健康狀態被快取住的話這個端點就是在說謊

@@ -27,7 +27,7 @@ from .srs import (
 
 DATA_DIR = Path(os.environ.get("DL_DATA_DIR", Path.home() / "driver-license-data"))
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS user (
@@ -197,6 +197,15 @@ def _upgrade_v3_to_v4(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE review_event ADD COLUMN preset_params TEXT")
 
 
+def _upgrade_v4_to_v5(conn: sqlite3.Connection) -> None:
+    """首答答對改排到 7 天後：既有歷史用事件日誌一次性重放到新規則。"""
+    rows = conn.execute(
+        "SELECT DISTINCT user_id, card_id, deck FROM review_event ORDER BY user_id, card_id"
+    ).fetchall()
+    for r in rows:
+        rebuild_card(conn, r["user_id"], r["card_id"], r["deck"], user_settings(conn, r["user_id"]))
+
+
 def _rebuild_from_v1(conn: sqlite3.Connection) -> None:
     """把單租戶的 v1 資料整批搬給 user 1。
 
@@ -278,16 +287,22 @@ def _migrate(conn: sqlite3.Connection) -> None:
         return
 
     if version == 0:
-        # _rebuild_from_v1 走的是 _apply_schema，建出來就是最新形狀，不必再逐級升
+        # _rebuild_from_v1 只搬 schema；排程語意變更仍要接著跑 v4 → v5 的重放。
         if _is_v1(conn):
             _rebuild_from_v1(conn)
-        version = SCHEMA_VERSION
+            version = 4
+        else:
+            _apply_schema(conn)
+            version = SCHEMA_VERSION
     if version == 2:
         _upgrade_v2_to_v3(conn)
         version = 3
     if version == 3:
         _upgrade_v3_to_v4(conn)
         version = 4
+    if version == 4:
+        _upgrade_v4_to_v5(conn)
+        version = 5
 
     if version != SCHEMA_VERSION:
         raise RuntimeError(f"沒有 v{version} → v{SCHEMA_VERSION} 的遷移路徑")

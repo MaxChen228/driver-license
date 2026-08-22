@@ -7,6 +7,7 @@
 
 const FORGOT = 0;
 const REMEMBERED = 1;
+const FIRST_REMEMBERED_HOURS = 24 * 7;
 
 const UNLEARNED = "unlearned";
 const DUE = "due";
@@ -101,7 +102,9 @@ function applyFeedback(state, remembered, cfg, now) {
     lapse_count: 0, streak: 0, last_feedback: -1,
   };
   const base = s.review_count === 0 ? cfg.initial_hours : s.interval_hours;
-  const interval = nextIntervalHours(base, remembered, cfg);
+  const interval = s.review_count === 0 && remembered
+    ? Math.min(cfg.max_hours, Math.max(cfg.min_hours, FIRST_REMEMBERED_HOURS))
+    : nextIntervalHours(base, remembered, cfg);
   return {
     interval_hours: interval,
     next_review_at: new Date(now.getTime() + interval * 3600e3).toISOString(),
@@ -114,7 +117,7 @@ function applyFeedback(state, remembered, cfg, now) {
 }
 
 export {
-  FORGOT, REMEMBERED, UNLEARNED, DUE, REVIEWED,
+  FORGOT, REMEMBERED, FIRST_REMEMBERED_HOURS, UNLEARNED, DUE, REVIEWED,
   PRESETS, DEFAULT_PRESET, CUSTOM_PRESET, params, resolve, asParams,
   REMEMBERED_MULT_RANGE, FORGOT_MULT_RANGE, clampMult,
   nextIntervalHours, deriveState, applyFeedback,

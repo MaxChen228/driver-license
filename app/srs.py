@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 
 FORGOT = 0
 REMEMBERED = 1
+FIRST_REMEMBERED_HOURS = 24 * 7
 
 
 @dataclass(frozen=True)
@@ -153,7 +154,11 @@ def apply_feedback(
 ) -> CardState:
     """套用一次作答，回傳新狀態。純函式，不碰 DB。"""
     base = cfg.initial_hours if state.review_count == 0 else state.review_interval_hours
-    interval = next_interval_hours(base, remembered, cfg)
+    interval = (
+        min(cfg.max_hours, max(cfg.min_hours, FIRST_REMEMBERED_HOURS))
+        if state.review_count == 0 and remembered
+        else next_interval_hours(base, remembered, cfg)
+    )
     return CardState(
         review_interval_hours=interval,
         next_review_at=now + timedelta(hours=interval),

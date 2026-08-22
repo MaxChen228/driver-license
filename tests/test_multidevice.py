@@ -13,8 +13,8 @@ import pytest
 from tests.conftest import _fresh_client
 
 # t1 對、t2 錯、t3 對。挑這個序列是因為它對順序特別敏感：
-#   fresh(24) →對→ 24×2.5=60 →錯→ 60×0.5=30 →對→ 30×2.5=75
-# 換成任何其他順序都不會是 75。
+#   fresh →對→ 168 →錯→ 168×0.5=84 →對→ 84×2.5=210
+# 換成任何其他順序都不會是 210。
 TIMES = [
     "2026-07-18T02:00:00+00:00",
     "2026-07-19T02:00:00+00:00",
@@ -42,11 +42,11 @@ def test_in_order_delivery_is_the_reference_result(client):
     for e in evs:
         client.post("/api/sync", json={"answers": [e]})
     st = _state(client)
-    assert st["interval_hours"] == 75.0          # 24×2.5 → ×0.5 → ×2.5
+    assert st["interval_hours"] == 210.0         # 168 → ×0.5 → ×2.5
     assert st["review_count"] == 3
     assert st["lapse_count"] == 1
     assert st["streak"] == 1
-    assert st["next_review_at"] == "2026-07-23T05:00:00+00:00"  # t3 + 75h
+    assert st["next_review_at"] == "2026-07-28T20:00:00+00:00"  # t3 + 210h
 
 
 def test_every_arrival_order_converges(tmp_path_factory):
@@ -64,7 +64,7 @@ def test_every_arrival_order_converges(tmp_path_factory):
     reference = results[(0, 1, 2)]
     for perm, st in results.items():
         assert st == reference, f"抵達順序 {perm} 的結果與依序抵達不同"
-    assert reference["interval_hours"] == 75.0
+    assert reference["interval_hours"] == 210.0
 
 
 def test_out_of_order_arrival_rewrites_event_snapshots(client):
@@ -78,13 +78,13 @@ def test_out_of_order_arrival_rewrites_event_snapshots(client):
     client.post("/api/sync", json={"answers": [evs[0]]})  # 再送最舊的
     client.post("/api/sync", json={"answers": [evs[1]]})  # 中間那筆最後到
 
-    assert _state(client)["interval_hours"] == 75.0
+    assert _state(client)["interval_hours"] == 210.0
 
     # e3（t3，答對）現在是時間序最後一筆，但它是「第一個被寫進 DB 的」。
-    # regrade 改判它為 forgot：正確的 before 是 e2 之後的狀態 interval=30，
-    # 於是 30×0.5=15。若快照沒被重算，這裡會拿到當初那個 fresh→60 的舊值。
+    # regrade 改判它為 forgot：正確的 before 是 e2 之後的狀態 interval=84，
+    # 於是 84×0.5=42。若快照沒被重算，這裡會拿到當初首答答對的舊值。
     r = client.post("/api/answer/regrade", json={"card_id": CARD}).json()
-    assert r["interval_hours"] == 15.0
+    assert r["interval_hours"] == 42.0
     assert r["review_count"] == 3
     assert r["lapse_count"] == 2
 
@@ -129,7 +129,7 @@ def test_batch_touching_one_card_many_times_rebuilds_once(client, monkeypatch):
     client.post("/api/sync", json={"answers": [evs[2]]})
     r = client.post("/api/sync", json={"answers": [evs[1], evs[0]]}).json()
     assert r["sync"]["applied"] == ["e1", "e2"]  # 批內仍照 reviewed_at 排序
-    assert _state(client)["interval_hours"] == 75.0
+    assert _state(client)["interval_hours"] == 210.0
     # 兩筆都亂序、都碰同一張卡，但整批只該重算一次
     assert calls == [CARD]
 
@@ -165,7 +165,7 @@ def test_pause_does_not_collapse_the_history_of_backfilled_answers(client):
         client.post("/api/sync", json={"answers": [evs[i]]})
 
     st = _state(client)
-    assert st["interval_hours"] == 75.0
+    assert st["interval_hours"] == 210.0
     assert st["review_count"] == 3 and st["lapse_count"] == 1 and st["streak"] == 1
     # 每一天各自記帳，不能全部塌成暫停那一天
     activity = client.get("/api/stats", params={"deck": "car"}).json()["activity"]
@@ -175,8 +175,8 @@ def test_pause_does_not_collapse_the_history_of_backfilled_answers(client):
 def test_changing_preset_does_not_rewrite_older_history(client):
     """換 preset 之後，任何一筆遲到的舊事件都不該把整張卡改寫。
 
-    重算若一律用「現在的」參數：relaxed 下答對三次是 375h，切到 intensive 後
-    來一筆亂序的舊事件會整段重算成 30.7h —— 使用者只是換過設定，卡片卻悄悄
+    重算若一律用「現在的」參數：relaxed 下答對三次是 1050h，切到 intensive 後
+    來一筆亂序的舊事件會整段重算成 460.99h —— 使用者只是換過設定，卡片卻悄悄
     搬家，而且最終狀態重新取決於抵達順序。每筆事件用它自己的 preset 才對。
     """
     answer = client.get(f"/api/card/{CARD}").json()["question"]["answer"]
@@ -185,7 +185,7 @@ def test_changing_preset_does_not_rewrite_older_history(client):
             {"card_id": CARD, "chosen": answer, "client_event_id": f"r{i}",
              "reviewed_at": t},
         ]})
-    assert _state(client)["interval_hours"] == 375.0  # 24 × 2.5³
+    assert _state(client)["interval_hours"] == 1050.0  # 168 × 2.5²
 
     client.put("/api/settings", json={"preset": "intensive"})
 
@@ -194,15 +194,15 @@ def test_changing_preset_does_not_rewrite_older_history(client):
         {"card_id": CARD, "chosen": answer, "client_event_id": "late",
          "reviewed_at": "2026-07-17T02:00:00+00:00"},
     ]})
-    # 重算後的鏈：late 用 intensive（它作答時的設定），另外三筆維持 relaxed
-    #   fresh(intensive 8h) →×1.4→ 11.2 →×2.5→ 28 →×2.5→ 70 →×2.5→ 175
-    # 插進一筆更早的事件本來就會讓整條鏈重算，175 ≠ 375 是正常的。
+    # 重算後的鏈：late 用 intensive（首答對仍是 168h），另外三筆維持 relaxed
+    #   168 →×2.5→ 420 →×2.5→ 1050 →×2.5→ cap 1440
+    # 插進一筆更早的事件本來就會讓整條鏈重算，1440 ≠ 1050 是正常的。
     st = _state(client)
     assert st["review_count"] == 4
-    assert st["interval_hours"] == 175.0
-    # 關鍵：不能是 30.73 —— 那是「整段歷史都用現在的 intensive 重算」的結果
-    #   fresh(8) →×1.4→ 11.2 →×1.4→ 15.68 →×1.4→ 21.95 →×1.4→ 30.73
-    assert st["interval_hours"] != pytest.approx(30.73, abs=0.01)
+    assert st["interval_hours"] == 1440.0
+    # 關鍵：不能是 460.99 —— 那是「整段歷史都用現在的 intensive 重算」的結果
+    #   168 →×1.4→ 235.2 →×1.4→ 329.28 →×1.4→ 460.99
+    assert st["interval_hours"] != pytest.approx(460.99, abs=0.01)
 
 
 def test_events_sort_by_instant_not_by_text(client):
