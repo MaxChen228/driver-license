@@ -68,9 +68,9 @@ git pull --ff-only
 uv sync
 after="$(git rev-parse HEAD)"
 if [[ "$before" == "$after" ]]; then
-  echo "  已經是最新的（$after）"
+  echo "  已經是最新的（${after}）"
 else
-  echo "  $before → $after"
+  echo "  ${before} → ${after}"
 fi
 
 # ── 4. 測試 ─────────────────────────────────────────────────────────────
