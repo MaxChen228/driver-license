@@ -297,6 +297,13 @@ function counts(deck) {
 }
 
 function buildQueue(deck, kind, category) {
+  if (kind === "random50") {
+    return shuffled(
+      BANK[deck].questions
+        .filter((q) => !category || q.category === category)
+        .map((q) => q.id)
+    ).slice(0, 50);
+  }
   const now = refNow();
   const unlearned = [];
   const due = [];
@@ -395,6 +402,7 @@ function deckCard(d, c) {
   const actions = [
     { kind: "due", icon: "play", label: "複習到期", count: c.due },
     { kind: "unlearned", icon: "plus", label: "學新題", count: c.unlearned },
+    { kind: "random50", icon: "shuffle", label: "隨機50題", count: Math.min(d.total, 50) },
     { kind: "all", icon: "layers", label: "全部", count: c.due + c.unlearned },
   ];
   if (!c.due) actions.unshift(actions.splice(1, 1)[0]);   // 沒有到期 → 學新題排最前
@@ -535,11 +543,12 @@ function startSession(deck, kind, category, opts) {
   const ids = buildQueue(deck, kind, category);
   if (!ids.length) return renderHome();
   S = {
-    ids: ROUND > 0 ? ids.slice(0, ROUND) : ids,
+    ids: kind === "random50" || ROUND <= 0 ? ids : ids.slice(0, ROUND),
     i: 0, deck, kind, category,
     from: (opts && opts.from) || CURRENT,
+    practice: kind === "random50",
     answered: false, cardId: null, t0: 0,
-    right: 0, guessed: 0,
+    right: 0, guessed: 0, history: [],
   };
   show("session", opts);
   loadCard();
@@ -547,13 +556,15 @@ function startSession(deck, kind, category, opts) {
 
 function loadCard() {
   const id = S.ids[S.i];
+  const rec = S.history[S.i] || null;
   S.cardId = id;
-  S.answered = false;
+  S.answered = !!rec;
   const q = question(id);
 
   $("#progress-bar").style.width = `${(S.i / S.ids.length) * 100}%`;
   $("#progress-text").textContent = `${S.i + 1} / ${S.ids.length}　·　${q.category}`;
-  $("#btn-shuffle").disabled = S.ids.length - S.i < 2;
+  $("#btn-prev").disabled = S.i <= 0;
+  $("#btn-shuffle").disabled = S.ids.length - firstUnansweredIndex() < 2;
   $("#q-meta").textContent = `${q.id}　${q.architecture}`;
   // 圖片題（汽車 95、機車 126）沒有文字題幹，畫面上半部就完全沒有「要回答什麼」。
   // 補一行提示，但樣式刻意跟真題幹拉開兩級（見 style.css 的 .is-fallback）——
@@ -599,12 +610,23 @@ function loadCard() {
   $("#q-warn").hidden = !(st && st.lapse_count);
 
   $("#verdict").hidden = true;
-  $("#next-bar").hidden = true;
+  $("#next-bar").hidden = !rec;
   $("#btn-guessed").hidden = false;
   $("#note").value = SNAP.notes.get(id) || "";
   $("#note-status").textContent = "";
   $("#note-box").open = false;
-  S.t0 = performance.now();
+  if (rec) {
+    paintVerdict(rec.result, rec.chosen, { quiet: true });
+  } else {
+    S.t0 = performance.now();
+  }
+}
+
+function firstUnansweredIndex() {
+  for (let i = 0; i < S.ids.length; i += 1) {
+    if (!S.history[i]) return i;
+  }
+  return S.ids.length;
 }
 
 // 本地算完就直接顯示，不等網路。伺服器之後重放同一個事件會得到同樣的結果。
@@ -620,41 +642,55 @@ async function submit(chosen, guessed = false) {
   const now = refNow();
   const after = srs.applyFeedback(before, remembered, params(), now);
 
-  SNAP.states.set(q.id, { id: q.id, deck: q.deck, ...after });
+  let ev = null;
+  if (!S.practice) {
+    SNAP.states.set(q.id, { id: q.id, deck: q.deck, ...after });
 
-  const ev = {
-    client_event_id: eventId(),
-    card_id: q.id,
-    chosen,
-    guessed,
-    elapsed_ms: Math.round(performance.now() - S.t0),
-    reviewed_at: new Date().toISOString(),   // 真實牆鐘時間，供熱力圖與補送排序
-    preset: SNAP.preset,  // 重放時要用「當時」的參數，不是現在的（比照 schema v3）
-    // custom 的數值會被改，只存名字等於讓每次調倍率都把過去整段重寫。
-    ...(SNAP.preset === srs.CUSTOM_PRESET ? { preset_params: SNAP.custom_params } : {}),
-  };
-  // events 是這台裝置的完整歷史，兩種模式都寫、永遠留著（登入時要拿它併進帳號，
-  // 匿名時要拿它算正確率與連續天數）。outbox 只是待補送佇列，匿名模式不寫 ——
-  // 「匿名」的定義就是伺服器一列都不寫。
-  await store.eventsPut(ev);
-  if (signedIn()) await store.outboxPut(ev);
-  await persist();
+    ev = {
+      client_event_id: eventId(),
+      card_id: q.id,
+      chosen,
+      guessed,
+      elapsed_ms: Math.round(performance.now() - S.t0),
+      reviewed_at: new Date().toISOString(),   // 真實牆鐘時間，供熱力圖與補送排序
+      preset: SNAP.preset,  // 重放時要用「當時」的參數，不是現在的（比照 schema v3）
+      // custom 的數值會被改，只存名字等於讓每次調倍率都把過去整段重寫。
+      ...(SNAP.preset === srs.CUSTOM_PRESET ? { preset_params: SNAP.custom_params } : {}),
+    };
+    // events 是這台裝置的完整歷史，兩種模式都寫、永遠留著（登入時要拿它併進帳號，
+    // 匿名時要拿它算正確率與連續天數）。outbox 只是待補送佇列，匿名模式不寫 ——
+    // 「匿名」的定義就是伺服器一列都不寫。
+    await store.eventsPut(ev);
+    if (signedIn()) await store.outboxPut(ev);
+    await persist();
+  }
 
   S.chosen = chosen;
   S.before = before || null;
   S.now = now;
-  S.eventId = ev.client_event_id;
+  S.eventId = ev ? ev.client_event_id : null;
+  for (const h of S.history) if (h) h.canRegrade = false;
+  S.history[S.i] = {
+    chosen,
+    before: S.before,
+    now,
+    eventId: ev ? ev.client_event_id : null,
+    canRegrade: !S.practice,
+    result: { correct, answer: q.answer, remembered, practice: S.practice, ...after },
+  };
 
   // 答錯給一下短震動。手機上的即時回饋目前只有顏色變化，而這是一天會遇到
   // 上百次的那個瞬間。答對不震 —— 對的事情不需要打斷你。
   if (!correct && navigator.vibrate) navigator.vibrate(30);
 
-  paintVerdict({ correct, answer: q.answer, remembered, ...after }, chosen);
-  paintNet();
-  syncSoon();
+  paintVerdict(S.history[S.i].result, chosen);
+  if (!S.practice) {
+    paintNet();
+    syncSoon();
+  }
 }
 
-function paintVerdict(r, chosen) {
+function paintVerdict(r, chosen, opts = {}) {
   $("#options").querySelectorAll(".opt").forEach((b) => {
     const n = Number(b.dataset.n);
     b.disabled = true;
@@ -681,20 +717,23 @@ function paintVerdict(r, chosen) {
   // 原本還接一句「（間隔 2.5 天）」—— 跟前面的「3 天後」是同一件事的兩種單位，
   // 連著兩個括號。間隔屬於演算法的內部量，設定頁的「複習節奏」已經完整交代。
   $("#verdict-sched").textContent =
-    `下次複習：${fmtDue(r.next_review_at)}` +
-    (r.correct ? "" : `　·　累計答錯 ${r.lapse_count} 次`);
-  $("#btn-guessed").hidden = !r.correct || !r.remembered;
+    (r.practice ? "隨機練習，不記錄複習進度" : `下次複習：${fmtDue(r.next_review_at)}`) +
+    (r.correct || r.practice ? "" : `　·　累計答錯 ${r.lapse_count} 次`);
+  const rec = S && S.history ? S.history[S.i] : null;
+  $("#btn-guessed").hidden = !r.correct || !r.remembered || !(rec && rec.canRegrade);
   $("#verdict").hidden = false;
   $("#next-bar").hidden = false;
   ensureVisible($("#verdict"));
-  announce(
-    (r.correct ? "答對" : `答錯，正解是選項 ${r.answer}`) +
-    `。下次複習 ${fmtDue(r.next_review_at)}。`
-  );
+  if (!opts.quiet) {
+    announce(
+      (r.correct ? "答對" : `答錯，正解是選項 ${r.answer}`) +
+      (r.practice ? "。這題不記錄複習進度。" : `。下次複習 ${fmtDue(r.next_review_at)}。`)
+    );
+  }
   // 焦點原本留在剛剛按下、而且已經 disabled 的那顆選項上 —— disabled 的元素
   // 不能有焦點，於是整個掉回 body：鍵盤使用者要重新 Tab 一輪，螢幕閱讀器的
   // 游標也回到頁首。交給下一題，接下來的動作就在手上。
-  $("#btn-next").focus({ preventScroll: true });
+  if (!opts.quiet) $("#btn-next").focus({ preventScroll: true });
 }
 
 // 螢幕閱讀器播報。同一段文字連送兩次不會被唸第二次，而「答對」後面接「答對」
@@ -724,21 +763,25 @@ function ensureVisible(el) {
 $("#btn-guessed").addEventListener("click", async () => {
   if (!S || !S.answered) return;
   const q = question(S.cardId);
+  const rec = S.history[S.i];
+  if (!rec || !rec.canRegrade) return;
   // 匿名模式沒有 outbox，那一筆永遠只在本地 —— 一律走本地重算這條路。
-  const pending = signedIn() ? await store.outboxGet(S.eventId) : true;
+  const pending = signedIn() ? await store.outboxGet(rec.eventId) : true;
 
   if (pending) {
     // 還沒送出去 —— 直接改本地那筆，並用當初的 before 重算，不需要網路
-    const ev = await store.eventsGet(S.eventId);
+    const ev = await store.eventsGet(rec.eventId);
     if (ev) {
       ev.guessed = true;
       await store.eventsPut(ev);
       if (signedIn()) await store.outboxPut(ev);
     }
-    const after = srs.applyFeedback(S.before, false, params(), S.now);
+    const after = srs.applyFeedback(rec.before, false, params(), rec.now);
     SNAP.states.set(q.id, { id: q.id, deck: q.deck, ...after });
     await persist();
-    paintVerdict({ correct: true, answer: q.answer, remembered: false, ...after }, S.chosen);
+    rec.result = { correct: true, answer: q.answer, remembered: false, ...after };
+    rec.canRegrade = false;
+    paintVerdict(rec.result, rec.chosen);
   } else {
     // 已經送出去了 —— 請伺服器用事件裡的 before 快照精確回捲
     try {
@@ -752,7 +795,9 @@ $("#btn-guessed").addEventListener("click", async () => {
         lapse_count: r.lapse_count, streak: r.streak, last_feedback: srs.FORGOT,
       });
       await persist();
-      paintVerdict({ ...r, remembered: false }, S.chosen);
+      rec.result = { ...r, remembered: false };
+      rec.canRegrade = false;
+      paintVerdict(rec.result, rec.chosen);
     } catch {
       flash($("#btn-guessed"), "離線，稍後再試");
       return;
@@ -767,7 +812,7 @@ $("#btn-guessed").addEventListener("click", async () => {
 // 洗牌（照 kg：只打亂「還沒作答」的尾段，已經做過的不動，才不會重複刷同一批）
 $("#btn-shuffle").addEventListener("click", () => {
   if (!S) return;
-  const from = S.answered ? S.i + 1 : S.i;
+  const from = firstUnansweredIndex();
   const tail = shuffled(S.ids.slice(from));
   S.ids = S.ids.slice(0, from).concat(tail);
   if (!S.answered) loadCard();
@@ -789,6 +834,14 @@ function flash(btn, msg) {
 }
 
 $("#btn-next").addEventListener("click", next);
+$("#btn-prev").addEventListener("click", prev);
+
+function prev() {
+  if (!S || S.i <= 0) return;
+  S.i -= 1;
+  loadCard();
+}
+
 function next() {
   S.i += 1;
   if (S.i >= S.ids.length) return finishRound();
@@ -802,7 +855,7 @@ function finishRound() {
   if (!S.kind) { S = null; return history.back(); }
   const r = {
     deck: S.deck, kind: S.kind, category: S.category, from: S.from,
-    total: S.ids.length, right: S.right, guessed: S.guessed,
+    total: S.ids.length, right: S.right, guessed: S.guessed, practice: S.practice,
   };
   S = null;
   renderDone(r);
@@ -813,7 +866,7 @@ const BACK_LABEL = { home: "回首頁", stats: "回統計", browse: "回題庫" 
 function renderDone(r) {
   // 剩幾題要重新算，不能拿原本佇列的尾巴 —— 剛剛答過的那些已經不再到期／未學，
   // 而且答錯的可能又排回來了。重建一次才是當下的事實。
-  const remaining = buildQueue(r.deck, r.kind, r.category).length;
+  const remaining = r.practice ? 0 : buildQueue(r.deck, r.kind, r.category).length;
   const pct = Math.round((r.right / r.total) * 100);
   $("#view-done").innerHTML = `
     <div class="done">
@@ -821,16 +874,18 @@ function renderDone(r) {
       <h2>本輪完成</h2>
       <p class="done-score"><b>${r.right} / ${r.total}</b>
         <span>答對 ${pct}%${r.guessed ? `　·　其中 ${r.guessed} 題按了「我是猜的」` : ""}</span></p>
-      <p>${remaining
+      <p>${r.practice
+        ? "隨機練習不會記錄到複習進度。"
+        : remaining
         ? `這副牌還剩 ${remaining} 題。`
         : "這副牌目前沒有到期或未學的題目了。"}</p>
       <div class="done-actions">
-        ${remaining ? `<button class="btn" id="done-again">再來一輪${ico("right", "ico btn-trail")}</button>` : ""}
+        ${r.practice || remaining ? `<button class="btn" id="done-again">${r.practice ? "再抽50題" : "再來一輪"}${ico("right", "ico btn-trail")}</button>` : ""}
         <button class="btn" id="done-home">${BACK_LABEL[r.from] || "回首頁"}${ico("right", "ico btn-trail")}</button>
       </div>
     </div>`;
   // 這個畫面是動態產生的，接不到檔尾那個一次性的 [data-nav] 綁定
-  if (remaining) {
+  if (r.practice || remaining) {
     // replace：新的一輪取代結算這一格。不然做十輪就疊十格結算 + 十格作答，
     // 而那二十格全部是回不去的死格子。
     $("#done-again").addEventListener("click", () =>
@@ -1004,7 +1059,7 @@ $("#br-list").addEventListener("click", (e) => {
   if (!row) return;
   // kind 為 null＝這不是「一輪」，做完退回上一頁而不是給結算（見 finishRound）
   S = { ids: [row.dataset.id], i: 0, deck: $("#br-deck").value, kind: null,
-        from: CURRENT, right: 0, guessed: 0 };
+        from: CURRENT, practice: false, right: 0, guessed: 0, history: [] };
   show("session"); loadCard();
 });
 ["#br-q", "#br-cat", "#br-wrong", "#br-noted"].forEach((s) =>
