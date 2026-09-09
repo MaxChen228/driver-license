@@ -29,7 +29,7 @@ from .srs import (
 
 DATA_DIR = Path(os.environ.get("DL_DATA_DIR", Path.home() / "driver-license-data"))
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS user (
@@ -117,6 +117,18 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_adjustment_client
   ON progress_adjustment(user_id, client_action_id);
 CREATE INDEX IF NOT EXISTS idx_adjustment_user_time
   ON progress_adjustment(user_id, applied_at);
+
+CREATE TABLE IF NOT EXISTS progress_reset (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id          INTEGER NOT NULL REFERENCES user(id) ON DELETE CASCADE,
+  card_id          TEXT NOT NULL,
+  client_action_id TEXT NOT NULL,
+  reset_at         TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_reset_client
+  ON progress_reset(user_id, client_action_id);
+CREATE INDEX IF NOT EXISTS idx_reset_card_time
+  ON progress_reset(user_id, card_id, reset_at);
 
 CREATE TABLE IF NOT EXISTS note (
   user_id INTEGER NOT NULL REFERENCES user(id) ON DELETE CASCADE,
@@ -245,6 +257,27 @@ def _upgrade_v5_to_v6(conn: sqlite3.Connection) -> None:
     )
 
 
+def _upgrade_v6_to_v7(conn: sqlite3.Connection) -> None:
+    """建立隨機練習答錯時清除該題進度的操作表。"""
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS progress_reset (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             user_id INTEGER NOT NULL REFERENCES user(id) ON DELETE CASCADE,
+             card_id TEXT NOT NULL,
+             client_action_id TEXT NOT NULL,
+             reset_at TEXT NOT NULL
+           )"""
+    )
+    conn.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS idx_reset_client
+           ON progress_reset(user_id, client_action_id)"""
+    )
+    conn.execute(
+        """CREATE INDEX IF NOT EXISTS idx_reset_card_time
+           ON progress_reset(user_id, card_id, reset_at)"""
+    )
+
+
 def _rebuild_from_v1(conn: sqlite3.Connection) -> None:
     """把單租戶的 v1 資料整批搬給 user 1。
 
@@ -340,11 +373,18 @@ def _migrate(conn: sqlite3.Connection) -> None:
         _upgrade_v3_to_v4(conn)
         version = 4
     if version == 4:
+        # v4 → v5 會立即重播事件，而重播器現在也會讀這兩張操作表。
+        # 先建表，再跑首答規則遷移，避免真實 v4 DB 在遷移中途看到不存在的表。
+        _upgrade_v5_to_v6(conn)
+        _upgrade_v6_to_v7(conn)
         _upgrade_v4_to_v5(conn)
         version = 5
     if version == 5:
         _upgrade_v5_to_v6(conn)
         version = 6
+    if version == 6:
+        _upgrade_v6_to_v7(conn)
+        version = 7
 
     if version != SCHEMA_VERSION:
         raise RuntimeError(f"沒有 v{version} → v{SCHEMA_VERSION} 的遷移路徑")
@@ -592,6 +632,52 @@ def all_adjustments(conn: sqlite3.Connection, user_id: int) -> list[dict]:
     ]
 
 
+def reset_exists(conn: sqlite3.Connection, user_id: int, client_action_id: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM progress_reset WHERE user_id=? AND client_action_id=?",
+        (user_id, client_action_id),
+    ).fetchone() is not None
+
+
+def log_reset(
+    conn: sqlite3.Connection,
+    user_id: int,
+    *,
+    card_id: str,
+    client_action_id: str,
+    reset_at: datetime,
+) -> None:
+    conn.execute(
+        """INSERT INTO progress_reset(user_id, card_id, client_action_id, reset_at)
+           VALUES(?,?,?,?)""",
+        (user_id, card_id, client_action_id, iso(reset_at)),
+    )
+
+
+def all_resets(conn: sqlite3.Connection, user_id: int) -> list[dict]:
+    return [
+        {
+            "card_id": r["card_id"],
+            "client_action_id": r["client_action_id"],
+            "reset_at": r["reset_at"],
+        }
+        for r in conn.execute(
+            """SELECT card_id, client_action_id, reset_at
+               FROM progress_reset WHERE user_id=?
+               ORDER BY reset_at, id""",
+            (user_id,),
+        )
+    ]
+
+
+def latest_reset_at(conn: sqlite3.Connection, user_id: int, card_id: str) -> datetime | None:
+    rows = conn.execute(
+        "SELECT reset_at FROM progress_reset WHERE user_id=? AND card_id=?",
+        (user_id, card_id),
+    ).fetchall()
+    return max((parse(r["reset_at"]) for r in rows), default=None)
+
+
 # ---------------------------------------------------------------- events
 
 
@@ -659,7 +745,7 @@ def _events_for_card(conn: sqlite3.Connection, user_id: int, card_id: str) -> li
 
 
 def _timeline_for_card(conn: sqlite3.Connection, user_id: int, card_id: str) -> list[tuple]:
-    """合併作答與全域調整，讓晚到的歷史事件仍能收斂。"""
+    """合併作答、調整與重置，讓晚到的歷史事件仍能收斂。"""
     timeline = [
         (parse(r["reviewed_at"]), 1, r["id"], "answer", r)
         for r in _events_for_card(conn, user_id, card_id)
@@ -667,6 +753,11 @@ def _timeline_for_card(conn: sqlite3.Connection, user_id: int, card_id: str) -> 
     timeline.extend(
         (parse(r["applied_at"]), 0, r["client_action_id"], "adjustment", r)
         for r in all_adjustments(conn, user_id)
+    )
+    timeline.extend(
+        (parse(r["reset_at"]), 0, r["client_action_id"], "reset", r)
+        for r in all_resets(conn, user_id)
+        if r["card_id"] == card_id
     )
     return sorted(timeline, key=lambda x: (x[0], x[1], x[2]))
 
@@ -677,7 +768,11 @@ def latest_event(conn: sqlite3.Connection, user_id: int, card_id: str):
     不是 ORDER BY id DESC ——「最後寫進 DB 的」與「最後作答的」在亂序補送之後
     不是同一筆。regrade 的語義是使用者的「我剛剛那次是猜的」，那指的是時間。
     """
-    rows = _events_for_card(conn, user_id, card_id)
+    reset_at = latest_reset_at(conn, user_id, card_id)
+    rows = [
+        r for r in _events_for_card(conn, user_id, card_id)
+        if reset_at is None or parse(r["reviewed_at"]) > reset_at
+    ]
     return rows[-1] if rows else None
 
 
@@ -694,11 +789,20 @@ def has_later_event(
     )
     if later_event:
         return True
-    return any(
+    later_adjustment = any(
         parse(r["applied_at"]) > at
         for r in conn.execute(
             "SELECT applied_at FROM progress_adjustment WHERE user_id=?",
             (user_id,),
+        )
+    )
+    if later_adjustment:
+        return True
+    return any(
+        parse(r["reset_at"]) > at
+        for r in conn.execute(
+            "SELECT reset_at FROM progress_reset WHERE user_id=? AND card_id=?",
+            (user_id, card_id),
         )
     )
 
@@ -724,6 +828,9 @@ def rebuild_card(
     """
     state = None
     for _, _, _, kind, row in _timeline_for_card(conn, user_id, card_id):
+        if kind == "reset":
+            state = None
+            continue
         if kind == "adjustment":
             if state is not None:
                 adjustment_cfg = replace(

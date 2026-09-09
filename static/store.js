@@ -69,6 +69,23 @@ const eventsAll = () => tx("events", "readonly", (s) => s.getAll());
 const eventsGet = (id) => tx("events", "readonly", (s) => s.get(id));
 const eventsCount = () => tx("events", "readonly", (s) => s.count());
 
+function deleteCardFrom(name, cardId) {
+  return open().then((db) => new Promise((resolve, reject) => {
+    const t = db.transaction(name, "readwrite");
+    t.objectStore(name).openCursor().onsuccess = (e) => {
+      const cur = e.target.result;
+      if (!cur) return;
+      if (cur.value.card_id === cardId) cur.delete();
+      cur.continue();
+    };
+    t.oncomplete = resolve;
+    t.onerror = () => reject(t.error);
+    t.onabort = () => reject(t.error);
+  }));
+}
+
+const eventsDeleteCard = (cardId) => deleteCardFrom("events", cardId);
+
 async function eventsPut(ev) {
   await tx("events", "readwrite", (s) => s.put(ev));
   // client_event_id 以時間戳當前綴，所以 key 順序就是時間順序 ——
@@ -100,6 +117,7 @@ const outboxPut = (ev) => tx("outbox", "readwrite", (s) => s.put(ev));
 const outboxDelete = (id) => tx("outbox", "readwrite", (s) => s.delete(id));
 const outboxCount = () => tx("outbox", "readonly", (s) => s.count());
 const outboxGet = (id) => tx("outbox", "readonly", (s) => s.get(id));
+const outboxDeleteCard = (cardId) => deleteCardFrom("outbox", cardId);
 
 async function outboxRemoveMany(ids) {
   const db = await open();
@@ -123,7 +141,7 @@ async function requestPersistence() {
 
 export {
   kvGet, kvPut, kvDelete,
-  outboxAll, outboxPut, outboxDelete, outboxCount, outboxGet, outboxRemoveMany,
-  eventsAll, eventsGet, eventsPut, eventsCount,
+  outboxAll, outboxPut, outboxDelete, outboxCount, outboxGet, outboxDeleteCard, outboxRemoveMany,
+  eventsAll, eventsGet, eventsPut, eventsCount, eventsDeleteCard,
   clearAll, requestPersistence,
 };

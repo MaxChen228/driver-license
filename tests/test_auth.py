@@ -29,6 +29,8 @@ PROTECTED = [
     ("PUT", "/api/note/C0001", {"body": "x"}),
     ("PUT", "/api/settings", {"preset": "relaxed"}),
     ("POST", "/api/answer", {"card_id": "C0001", "chosen": 1}),
+    ("POST", "/api/progress/compress", {"client_action_id": "compress-auth"}),
+    ("POST", "/api/progress/reset", {"card_id": "C0001", "client_action_id": "reset-auth"}),
     ("POST", "/api/answer/regrade", {"card_id": "C0001"}),
     ("POST", "/api/sync", {"answers": [], "notes": {}}),
     ("DELETE", "/api/account", {"password": TEST_PASSWORD}),
@@ -226,7 +228,8 @@ def test_deleting_an_account_takes_everything_with_it(client, tmp_path):
                           json={"password": TEST_PASSWORD}).status_code == 200
 
     conn = sqlite3.connect(tmp_path / "app.db")
-    for table in ("user", "session", "card_state", "review_event", "note", "user_setting"):
+    for table in ("user", "session", "card_state", "review_event", "progress_adjustment",
+                  "progress_reset", "note", "user_setting"):
         assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0, table
 
 

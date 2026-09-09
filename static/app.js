@@ -99,7 +99,7 @@ function emptySnapshot() {
   return {
     preset: (CONFIG && CONFIG.default_preset) || srs.DEFAULT_PRESET,
     custom_params: null,
-    paused: false, paused_at: null, adjustments: [], states: [], notes: {},
+    paused: false, paused_at: null, adjustments: [], resets: [], states: [], notes: {},
   };
 }
 
@@ -152,6 +152,7 @@ function adopt(payload) {
     preset: payload.preset || srs.DEFAULT_PRESET,
     custom_params: payload.custom_params || null,
     adjustments: payload.adjustments || [],
+    resets: payload.resets || [],
     states: new Map((payload.states || []).map((s) => [s.id, s])),
     notes: new Map(Object.entries(payload.notes || {})),
   };
@@ -162,6 +163,7 @@ async function persist() {
   await store.kvPut("snapshot", {
     ...SNAP,
     adjustments: SNAP.adjustments || [],
+    resets: SNAP.resets || [],
     states: [...SNAP.states.values()],
     notes: Object.fromEntries(SNAP.notes),
   });
@@ -184,13 +186,47 @@ function applyAdjustmentLocally(adjustment) {
   }
 }
 
+async function applyResetLocally(reset) {
+  SNAP.states.delete(reset.card_id);
+  SNAP.resets = [...(SNAP.resets || []), reset];
+  await store.eventsDeleteCard(reset.card_id);
+  await store.outboxDeleteCard(reset.card_id);
+  await persist();
+}
+
+async function resetPracticeCard(cardId) {
+  const reset = {
+    card_id: cardId,
+    client_action_id: eventId(),
+    reset_at: new Date().toISOString(),
+  };
+  await applyResetLocally(reset);
+  if (!signedIn() || !navigator.onLine) return;
+  try {
+    SNAP = adopt(await api("/api/progress/reset", {
+      method: "POST",
+      body: JSON.stringify(reset),
+    }));
+    await replayPending();
+    await persist();
+  } catch (e) {
+    if (String(e.message).startsWith("401")) await goLocal();
+    else syncSoon();
+  }
+}
+
 function rebuildLocalStates(events, adjustments) {
   const timeline = [
-    ...events.map((ev) => [new Date(ev.reviewed_at), 1, ev.client_event_id, "answer", ev]),
-    ...adjustments.map((a) => [new Date(a.applied_at), 0, a.client_action_id, "adjustment", a]),
+    ...events.map((ev) => [new Date(ev.reviewed_at), 2, ev.client_event_id, "answer", ev]),
+    ...adjustments.map((a) => [new Date(a.applied_at), 1, a.client_action_id, "adjustment", a]),
+    ...((SNAP.resets || []).map((r) => [new Date(r.reset_at), 0, r.client_action_id, "reset", r])),
   ].sort((a, b) => a[0] - b[0] || a[1] - b[1] || String(a[2]).localeCompare(String(b[2])));
   const states = new Map();
   for (const [, , , kind, item] of timeline) {
+    if (kind === "reset") {
+      states.delete(item.card_id);
+      continue;
+    }
     if (kind === "adjustment") {
       const p = params();
       const cfg = { ...p, min_hours: Number(item.min_hours ?? p.min_hours), max_hours: Number(item.max_hours ?? p.max_hours) };
@@ -223,7 +259,12 @@ async function sync({ silent = false } = {}) {
   const dirty = (await store.kvGet("notes_dirty")) || {};
   const res = await api("/api/sync", {
     method: "POST",
-    body: JSON.stringify({ answers, adjustments: SNAP.adjustments || [], notes: dirty }),
+    body: JSON.stringify({
+      answers,
+      adjustments: SNAP.adjustments || [],
+      resets: SNAP.resets || [],
+      notes: dirty,
+    }),
   });
 
   // applied 與 skipped 都代表「伺服器已經有了」；failed 是永久性失敗（例如題號不存在），
@@ -701,6 +742,9 @@ async function submit(chosen, guessed = false) {
     if (signedIn()) await store.outboxPut(ev);
     await persist();
   }
+
+  // 隨機練習本身不計分；但答錯代表這題目前不可靠，直接清掉它原有的正式進度。
+  if (S.practice && !correct) await resetPracticeCard(q.id);
 
   S.chosen = chosen;
   S.before = before || null;
@@ -1270,9 +1314,15 @@ async function localStats(deck) {
   let ok = 0;
   const days = new Set();
   const byDay = new Map();
+  const resetAt = new Map();
+  for (const reset of SNAP.resets || []) {
+    const at = new Date(reset.reset_at);
+    if (!resetAt.has(reset.card_id) || at > resetAt.get(reset.card_id)) resetAt.set(reset.card_id, at);
+  }
   for (const ev of await store.eventsAll()) {
     const q = question(ev.card_id);
     if (!q || q.deck !== deck) continue;
+    if (resetAt.has(ev.card_id) && new Date(ev.reviewed_at) <= resetAt.get(ev.card_id)) continue;
     total += 1;
     if (ev.chosen === q.answer) ok += 1;
     // 每日作答量與答對數。伺服器那邊叫 activity（day / count / correct），
@@ -1367,6 +1417,7 @@ async function compressProgress() {
           factor: adjustment.factor,
         }),
       }));
+      await replayPending();
     } catch (e) {
       if (String(e.message).startsWith("401")) { await goLocal(); return; }
       else return acctMsg("複習進度壓縮失敗，稍後再試。", true);
@@ -1521,6 +1572,7 @@ async function pushLocalHistory() {
       body: JSON.stringify({
         answers,
         adjustments: i === 0 ? (SNAP.adjustments || []) : [],
+        resets: i === 0 ? (SNAP.resets || []) : [],
         notes: i === 0 ? notes : {},
       }),
     });
@@ -1791,6 +1843,7 @@ async function exportData() {
     exported_at: new Date().toISOString(),
     events: await store.eventsAll(),
     adjustments: SNAP.adjustments || [],
+    resets: SNAP.resets || [],
     notes: Object.fromEntries(SNAP.notes),
     settings: { preset: SNAP.preset, custom_params: SNAP.custom_params,
                 paused: SNAP.paused, paused_at: SNAP.paused_at },
@@ -1827,6 +1880,11 @@ async function importData(file) {
       if (!adjustment || typeof adjustment.client_action_id !== "string" ||
           typeof adjustment.applied_at !== "string" || !(adjustment.factor > 0)) throw new Error("adjustment");
     }
+    if (data.resets !== undefined && !Array.isArray(data.resets)) throw new Error("resets");
+    for (const reset of data.resets || []) {
+      if (!reset || typeof reset.card_id !== "string" ||
+          typeof reset.client_action_id !== "string" || typeof reset.reset_at !== "string") throw new Error("reset");
+    }
   } catch {
     return acctMsg("這個檔案不是本 app 匯出的備份，或內容已損壞。", true);
   }
@@ -1845,6 +1903,9 @@ async function importData(file) {
   const knownAdjustments = new Map((SNAP.adjustments || []).map((a) => [a.client_action_id, a]));
   for (const adjustment of data.adjustments || []) knownAdjustments.set(adjustment.client_action_id, adjustment);
   SNAP.adjustments = [...knownAdjustments.values()];
+  const knownResets = new Map((SNAP.resets || []).map((r) => [r.client_action_id, r]));
+  for (const reset of data.resets || []) knownResets.set(reset.client_action_id, reset);
+  SNAP.resets = [...knownResets.values()];
   SNAP.states = rebuildLocalStates(all, SNAP.adjustments);
   await persist();
   if (signedIn()) {

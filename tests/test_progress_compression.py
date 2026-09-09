@@ -71,3 +71,47 @@ def test_compress_does_not_create_progress_for_unlearned_cards(client):
     assert result["states"] == []
     assert result["adjustments"]
     assert before["states"] == []
+
+
+def test_reset_removes_a_cards_history_and_makes_it_unlearned(client):
+    card_id = "C0003"
+    t0 = datetime(2026, 7, 20, 2, tzinfo=timezone.utc)
+    _answer(client, card_id, t0)
+    reset_at = t0 + timedelta(days=1)
+    action = {
+        "card_id": card_id,
+        "client_action_id": "reset-1",
+        "reset_at": reset_at.isoformat(),
+    }
+    result = client.post("/api/progress/reset", json=action).json()
+
+    assert result["states"] == []
+    assert result["resets"][0]["client_action_id"] == "reset-1"
+    assert client.get(f"/api/card/{card_id}").json()["review"] is None
+    assert client.get("/api/stats", params={"deck": "car"}).json()["answered_total"] == 0
+    assert client.get("/api/browse", params={"deck": "car", "wrong_only": True}).json()["count"] == 0
+
+    # 重送同一個重置操作不會再做任何事；重置後的晚到舊作答也不會復活進度。
+    again = client.post("/api/progress/reset", json=action).json()
+    assert again["states"] == [] and len(again["resets"]) == 1
+    late = client.post("/api/sync", json={"answers": [{
+        "card_id": card_id,
+        "chosen": client.get(f"/api/card/{card_id}").json()["question"]["answer"],
+        "client_event_id": "late-before-reset",
+        "reviewed_at": (t0 + timedelta(hours=12)).isoformat(),
+    }]}).json()
+    assert late["sync"]["failed"][0]["detail"] == "answer predates card reset"
+    assert late["states"] == []
+
+
+def test_reset_sync_is_idempotent(client):
+    card_id = "C0004"
+    action = {"card_id": card_id, "client_action_id": "reset-sync-1"}
+    first = client.post("/api/sync", json={"resets": [action]}).json()
+    assert first["sync"]["resets"] == {
+        "applied": ["reset-sync-1"], "skipped": [], "failed": []
+    }
+    second = client.post("/api/sync", json={"resets": [action]}).json()
+    assert second["sync"]["resets"] == {
+        "applied": [], "skipped": ["reset-sync-1"], "failed": []
+    }

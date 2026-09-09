@@ -244,6 +244,8 @@ EXPECTED_INDEXES = {
     "idx_session_user": "session",
     "idx_adjustment_client": "progress_adjustment",
     "idx_adjustment_user_time": "progress_adjustment",
+    "idx_reset_client": "progress_reset",
+    "idx_reset_card_time": "progress_reset",
 }
 
 

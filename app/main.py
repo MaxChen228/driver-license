@@ -527,11 +527,18 @@ class AdjustmentIn(BaseModel):
     factor: float = Field(default=2.0, gt=0, le=10)
 
 
+class ResetIn(BaseModel):
+    card_id: str
+    client_action_id: str = Field(min_length=1, max_length=128)
+    reset_at: datetime | None = None
+
+
 class SyncIn(BaseModel):
     # 上限不是效能考量，是「一個請求能讓伺服器做多少事」的閘門。
     # 前端補送本來就分批（每批 500 筆），正常使用永遠碰不到。
     answers: list[AnswerIn] = Field(default_factory=list, max_length=5000)
     adjustments: list[AdjustmentIn] = Field(default_factory=list, max_length=100)
+    resets: list[ResetIn] = Field(default_factory=list, max_length=5000)
     notes: dict[str, Annotated[str, Field(max_length=4000)]] = Field(
         default_factory=dict, max_length=5000
     )
@@ -617,6 +624,9 @@ def _apply_answer(conn, user_id: int, payload: AnswerIn,
                   dirty: set[tuple[str, str]] | None = None) -> dict:
     """呼叫端必須在 db.session(write=True) 之內。"""
     q = _question(payload.card_id)  # 題號不存在於題庫就 404
+    reset_at = db.latest_reset_at(conn, user_id, payload.card_id)
+    if payload.reviewed_at is not None and reset_at is not None and payload.reviewed_at <= reset_at:
+        raise HTTPException(409, "answer predates card reset")
     before = db.get_state(conn, user_id, payload.card_id, _cfg(conn, user_id))
     correct = payload.chosen == q["answer"]
     return _record(
@@ -650,6 +660,27 @@ def _apply_adjustment(
     return True
 
 
+def _apply_reset(
+    conn, user_id: int, payload: ResetIn,
+    dirty: set[tuple[str, str]] | None = None,
+) -> bool:
+    """記下重置邊界；事件重播會忽略它之前的作答。"""
+    q = _question(payload.card_id)
+    if db.reset_exists(conn, user_id, payload.client_action_id):
+        return False
+    db.log_reset(
+        conn, user_id,
+        card_id=q["id"],
+        client_action_id=payload.client_action_id,
+        reset_at=payload.reset_at or srs.utcnow(),
+    )
+    if dirty is None:
+        db.rebuild_card(conn, user_id, q["id"], q["deck"], _cfg(conn, user_id))
+    else:
+        dirty.add((q["id"], q["deck"]))
+    return True
+
+
 @app.post("/api/answer")
 def answer(payload: AnswerIn, user: sqlite3.Row = CurrentUser):
     with db.session(write=True) as conn:
@@ -664,6 +695,14 @@ def compress_progress(payload: AdjustmentIn, user: sqlite3.Row = CurrentUser):
     """把這個帳號目前已答過的卡片排程縮短一半。"""
     with db.session(write=True) as conn:
         _apply_adjustment(conn, user["id"], payload)
+        return _state_payload(conn, user["id"])
+
+
+@app.post("/api/progress/reset")
+def reset_progress(payload: ResetIn, user: sqlite3.Row = CurrentUser):
+    """清除一題在重置時間以前的複習痕跡，讓它回到未學習。"""
+    with db.session(write=True) as conn:
+        _apply_reset(conn, user["id"], payload)
         return _state_payload(conn, user["id"])
 
 
@@ -773,6 +812,7 @@ def _state_payload(conn, user_id: int) -> dict:
         "paused": db.get_setting(conn, user_id, "paused", "0") == "1",
         "paused_at": db.get_setting(conn, user_id, "paused_at", "") or None,
         "adjustments": db.all_adjustments(conn, user_id),
+        "resets": db.all_resets(conn, user_id),
         "states": db.all_states(conn, user_id),
         "notes": db.all_notes(conn, user_id),
     }
@@ -832,6 +872,7 @@ def sync(payload: SyncIn, user: sqlite3.Row = CurrentUser):
     """
     applied, skipped, failed = [], [], []
     adjustment_applied, adjustment_skipped, adjustment_failed = [], [], []
+    reset_applied, reset_skipped, reset_failed = [], [], []
     ordered = sorted(
         payload.answers,
         key=lambda a: (a.reviewed_at or srs.utcnow(), a.client_event_id or ""),
@@ -840,6 +881,17 @@ def sync(payload: SyncIn, user: sqlite3.Row = CurrentUser):
     dirty: set[tuple[str, str]] = set()
     with db.session(write=True) as conn:
         uid = user["id"]
+        for reset in payload.resets:
+            try:
+                if _apply_reset(conn, uid, reset, dirty):
+                    reset_applied.append(reset.client_action_id)
+                else:
+                    reset_skipped.append(reset.client_action_id)
+            except HTTPException as exc:
+                reset_failed.append({
+                    "client_action_id": reset.client_action_id,
+                    "detail": exc.detail,
+                })
         for adjustment in payload.adjustments:
             try:
                 if _apply_adjustment(conn, uid, adjustment, dirty):
@@ -857,8 +909,8 @@ def sync(payload: SyncIn, user: sqlite3.Row = CurrentUser):
                 continue
             try:
                 _apply_answer(conn, uid, a, dirty)
-                if payload.adjustments:
-                    # 新卡的 state 是在這一批答案才建立，調整也必須納入重播。
+                if payload.adjustments or payload.resets:
+                    # 新卡的 state 是在這一批答案才建立，操作也必須納入重播。
                     q = _question(a.card_id)
                     dirty.add((q["id"], q["deck"]))
                 applied.append(a.client_event_id)
@@ -897,6 +949,12 @@ def sync(payload: SyncIn, user: sqlite3.Row = CurrentUser):
             "applied": adjustment_applied,
             "skipped": adjustment_skipped,
             "failed": adjustment_failed,
+        }
+    if payload.resets:
+        out["sync"]["resets"] = {
+            "applied": reset_applied,
+            "skipped": reset_skipped,
+            "failed": reset_failed,
         }
     return out
 
@@ -1012,7 +1070,14 @@ def stats(deck: str = Query(...), user: sqlite3.Row = CurrentUser):
 
         rows = conn.execute(
             """SELECT day_key, COUNT(*) n, SUM(correct) ok FROM review_event
-               WHERE user_id=? AND deck=? GROUP BY day_key ORDER BY day_key""",
+               WHERE user_id=? AND deck=?
+                 AND NOT EXISTS (
+                   SELECT 1 FROM progress_reset pr
+                   WHERE pr.user_id=review_event.user_id
+                     AND pr.card_id=review_event.card_id
+                     AND julianday(pr.reset_at) >= julianday(review_event.reviewed_at)
+                 )
+               GROUP BY day_key ORDER BY day_key""",
             (uid, deck),
         ).fetchall()
         activity = [{"day": r["day_key"], "count": r["n"], "correct": r["ok"] or 0} for r in rows]
