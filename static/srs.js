@@ -87,6 +87,16 @@ function nextIntervalHours(currentHours, remembered, cfg) {
   return Math.min(cfg.max_hours, Math.max(cfg.min_hours, base * mult));
 }
 
+function compressState(state, cfg, factor = 2) {
+  if (!state || !state.review_count) return state;
+  if (!(factor > 0)) throw new Error("compression factor must be positive");
+  const interval = Math.min(cfg.max_hours, Math.max(cfg.min_hours, state.interval_hours / factor));
+  const next = state.last_reviewed_at
+    ? new Date(new Date(state.last_reviewed_at).getTime() + interval * 3600e3).toISOString()
+    : state.next_review_at;
+  return { ...state, interval_hours: interval, next_review_at: next };
+}
+
 // 狀態是算出來的、不存欄位（照 kg）。少一欄就少一種不同步的可能。
 function deriveState(reviewCount, nextReviewAt, now) {
   if (!reviewCount) return UNLEARNED;
@@ -120,5 +130,5 @@ export {
   FORGOT, REMEMBERED, FIRST_REMEMBERED_HOURS, UNLEARNED, DUE, REVIEWED,
   PRESETS, DEFAULT_PRESET, CUSTOM_PRESET, params, resolve, asParams,
   REMEMBERED_MULT_RANGE, FORGOT_MULT_RANGE, clampMult,
-  nextIntervalHours, deriveState, applyFeedback,
+  nextIntervalHours, compressState, deriveState, applyFeedback,
 };

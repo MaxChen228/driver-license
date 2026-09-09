@@ -12,6 +12,7 @@ import json
 import os
 import sqlite3
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -22,12 +23,13 @@ from .srs import (
     CardState,
     ReviewSettings,
     apply_feedback,
+    compress_state,
     resolve,
 )
 
 DATA_DIR = Path(os.environ.get("DL_DATA_DIR", Path.home() / "driver-license-data"))
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS user (
@@ -101,6 +103,20 @@ CREATE INDEX IF NOT EXISTS idx_event_day ON review_event(user_id, deck, day_key)
 CREATE INDEX IF NOT EXISTS idx_event_card ON review_event(user_id, card_id, reviewed_at);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_event_client
   ON review_event(user_id, client_event_id);
+
+CREATE TABLE IF NOT EXISTS progress_adjustment (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id          INTEGER NOT NULL REFERENCES user(id) ON DELETE CASCADE,
+  client_action_id TEXT NOT NULL,
+  applied_at       TEXT NOT NULL,
+  factor           REAL NOT NULL,
+  min_hours        REAL NOT NULL,
+  max_hours        REAL NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_adjustment_client
+  ON progress_adjustment(user_id, client_action_id);
+CREATE INDEX IF NOT EXISTS idx_adjustment_user_time
+  ON progress_adjustment(user_id, applied_at);
 
 CREATE TABLE IF NOT EXISTS note (
   user_id INTEGER NOT NULL REFERENCES user(id) ON DELETE CASCADE,
@@ -206,6 +222,29 @@ def _upgrade_v4_to_v5(conn: sqlite3.Connection) -> None:
         rebuild_card(conn, r["user_id"], r["card_id"], r["deck"], user_settings(conn, r["user_id"]))
 
 
+def _upgrade_v5_to_v6(conn: sqlite3.Connection) -> None:
+    """建立可重放的全域複習進度調整表。"""
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS progress_adjustment (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             user_id INTEGER NOT NULL REFERENCES user(id) ON DELETE CASCADE,
+             client_action_id TEXT NOT NULL,
+             applied_at TEXT NOT NULL,
+             factor REAL NOT NULL,
+             min_hours REAL NOT NULL,
+             max_hours REAL NOT NULL
+           )"""
+    )
+    conn.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS idx_adjustment_client
+           ON progress_adjustment(user_id, client_action_id)"""
+    )
+    conn.execute(
+        """CREATE INDEX IF NOT EXISTS idx_adjustment_user_time
+           ON progress_adjustment(user_id, applied_at)"""
+    )
+
+
 def _rebuild_from_v1(conn: sqlite3.Connection) -> None:
     """把單租戶的 v1 資料整批搬給 user 1。
 
@@ -303,6 +342,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if version == 4:
         _upgrade_v4_to_v5(conn)
         version = 5
+    if version == 5:
+        _upgrade_v5_to_v6(conn)
+        version = 6
 
     if version != SCHEMA_VERSION:
         raise RuntimeError(f"沒有 v{version} → v{SCHEMA_VERSION} 的遷移路徑")
@@ -498,6 +540,58 @@ def all_states(conn: sqlite3.Connection, user_id: int) -> list[dict]:
     ]
 
 
+def card_keys(conn: sqlite3.Connection, user_id: int) -> list[tuple[str, str]]:
+    return [
+        (r["card_id"], r["deck"])
+        for r in conn.execute(
+            "SELECT card_id, deck FROM card_state WHERE user_id=?", (user_id,)
+        )
+    ]
+
+
+def adjustment_exists(conn: sqlite3.Connection, user_id: int, client_action_id: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM progress_adjustment WHERE user_id=? AND client_action_id=?",
+        (user_id, client_action_id),
+    ).fetchone() is not None
+
+
+def log_adjustment(
+    conn: sqlite3.Connection,
+    user_id: int,
+    *,
+    client_action_id: str,
+    applied_at: datetime,
+    factor: float,
+    min_hours: float,
+    max_hours: float,
+) -> None:
+    conn.execute(
+        """INSERT INTO progress_adjustment(
+             user_id, client_action_id, applied_at, factor, min_hours, max_hours
+           ) VALUES(?,?,?,?,?,?)""",
+        (user_id, client_action_id, iso(applied_at), factor, min_hours, max_hours),
+    )
+
+
+def all_adjustments(conn: sqlite3.Connection, user_id: int) -> list[dict]:
+    return [
+        {
+            "client_action_id": r["client_action_id"],
+            "applied_at": r["applied_at"],
+            "factor": r["factor"],
+            "min_hours": r["min_hours"],
+            "max_hours": r["max_hours"],
+        }
+        for r in conn.execute(
+            """SELECT client_action_id, applied_at, factor, min_hours, max_hours
+               FROM progress_adjustment WHERE user_id=?
+               ORDER BY applied_at, id""",
+            (user_id,),
+        )
+    ]
+
+
 # ---------------------------------------------------------------- events
 
 
@@ -564,6 +658,19 @@ def _events_for_card(conn: sqlite3.Connection, user_id: int, card_id: str) -> li
     return sorted(rows, key=lambda r: (parse(r["reviewed_at"]), r["id"]))
 
 
+def _timeline_for_card(conn: sqlite3.Connection, user_id: int, card_id: str) -> list[tuple]:
+    """合併作答與全域調整，讓晚到的歷史事件仍能收斂。"""
+    timeline = [
+        (parse(r["reviewed_at"]), 1, r["id"], "answer", r)
+        for r in _events_for_card(conn, user_id, card_id)
+    ]
+    timeline.extend(
+        (parse(r["applied_at"]), 0, r["client_action_id"], "adjustment", r)
+        for r in all_adjustments(conn, user_id)
+    )
+    return sorted(timeline, key=lambda x: (x[0], x[1], x[2]))
+
+
 def latest_event(conn: sqlite3.Connection, user_id: int, card_id: str):
     """這張卡「時間序上」最後一次作答。
 
@@ -577,12 +684,21 @@ def latest_event(conn: sqlite3.Connection, user_id: int, card_id: str):
 def has_later_event(
     conn: sqlite3.Connection, user_id: int, card_id: str, at: datetime
 ) -> bool:
-    """這張卡還有比 at 更晚的事件嗎？有的話剛寫進去的那筆就是亂序的。"""
-    return any(
+    """這張卡還有比 at 更晚的事件或調整嗎？有的話剛寫進去的那筆就是亂序的。"""
+    later_event = any(
         parse(r["reviewed_at"]) > at
         for r in conn.execute(
             "SELECT reviewed_at FROM review_event WHERE user_id=? AND card_id=?",
             (user_id, card_id),
+        )
+    )
+    if later_event:
+        return True
+    return any(
+        parse(r["applied_at"]) > at
+        for r in conn.execute(
+            "SELECT applied_at FROM progress_adjustment WHERE user_id=?",
+            (user_id,),
         )
     )
 
@@ -607,7 +723,16 @@ def rebuild_card(
     v3 之前的事件沒有記錄 preset，只能用呼叫端給的 cfg（那個資訊已經不在了）。
     """
     state = None
-    for r in _events_for_card(conn, user_id, card_id):
+    for _, _, _, kind, row in _timeline_for_card(conn, user_id, card_id):
+        if kind == "adjustment":
+            if state is not None:
+                adjustment_cfg = replace(
+                    cfg, min_hours=row["min_hours"], max_hours=row["max_hours"]
+                )
+                state = compress_state(state, adjustment_cfg, row["factor"])
+            continue
+
+        r = row
         ev_cfg = event_settings(r) or cfg
         # 首答用「該筆事件」的 initial_hours 當 base，所以 fresh() 也要跟著它
         before, at = state or CardState.fresh(ev_cfg), parse(r["reviewed_at"])
@@ -630,9 +755,14 @@ def rebuild_card(
                 user_id, r["id"],
             ),
         )
-    if state is None:  # 事件全被刪光（regrade 刪掉最後一筆的極端情況）
+    if state is None:  # 沒有事件（或尚未套用任何調整）
         state = CardState.fresh(cfg)
-    put_state(conn, user_id, card_id, deck, state)
+    if state.review_count:
+        put_state(conn, user_id, card_id, deck, state)
+    else:
+        conn.execute(
+            "DELETE FROM card_state WHERE user_id=? AND card_id=?", (user_id, card_id)
+        )
     return state
 
 

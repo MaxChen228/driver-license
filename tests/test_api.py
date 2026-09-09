@@ -296,7 +296,7 @@ def test_health_needs_no_auth_and_reports_schema_and_banks(anon_client):
     body = r.json()
     assert body["ok"] is True
     # 遷移真的跑完了才算健康；部署腳本比對的就是這個數字
-    assert body["schema_version"] == 5
+    assert body["schema_version"] == 6
     assert body["decks"]["car"]["questions"] == 1090
     assert body["decks"]["moto"]["questions"] == 806
     # 健康狀態被快取住的話這個端點就是在說謊

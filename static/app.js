@@ -99,7 +99,7 @@ function emptySnapshot() {
   return {
     preset: (CONFIG && CONFIG.default_preset) || srs.DEFAULT_PRESET,
     custom_params: null,
-    paused: false, paused_at: null, states: [], notes: {},
+    paused: false, paused_at: null, adjustments: [], states: [], notes: {},
   };
 }
 
@@ -151,6 +151,7 @@ function adopt(payload) {
     ...payload,
     preset: payload.preset || srs.DEFAULT_PRESET,
     custom_params: payload.custom_params || null,
+    adjustments: payload.adjustments || [],
     states: new Map((payload.states || []).map((s) => [s.id, s])),
     notes: new Map(Object.entries(payload.notes || {})),
   };
@@ -160,6 +161,7 @@ function adopt(payload) {
 async function persist() {
   await store.kvPut("snapshot", {
     ...SNAP,
+    adjustments: SNAP.adjustments || [],
     states: [...SNAP.states.values()],
     notes: Object.fromEntries(SNAP.notes),
   });
@@ -169,6 +171,41 @@ async function persist() {
 // 離線算出來的下次複習時間跟伺服器補送後的結果會對不起來。
 function refNow() {
   return SNAP.paused && SNAP.paused_at ? new Date(SNAP.paused_at) : new Date();
+}
+
+function applyAdjustmentLocally(adjustment) {
+  const cfg = {
+    ...params(),
+    min_hours: Number(adjustment.min_hours ?? params().min_hours),
+    max_hours: Number(adjustment.max_hours ?? params().max_hours),
+  };
+  for (const [id, state] of SNAP.states) {
+    SNAP.states.set(id, srs.compressState(state, cfg, adjustment.factor));
+  }
+}
+
+function rebuildLocalStates(events, adjustments) {
+  const timeline = [
+    ...events.map((ev) => [new Date(ev.reviewed_at), 1, ev.client_event_id, "answer", ev]),
+    ...adjustments.map((a) => [new Date(a.applied_at), 0, a.client_action_id, "adjustment", a]),
+  ].sort((a, b) => a[0] - b[0] || a[1] - b[1] || String(a[2]).localeCompare(String(b[2])));
+  const states = new Map();
+  for (const [, , , kind, item] of timeline) {
+    if (kind === "adjustment") {
+      const p = params();
+      const cfg = { ...p, min_hours: Number(item.min_hours ?? p.min_hours), max_hours: Number(item.max_hours ?? p.max_hours) };
+      for (const [id, state] of states) states.set(id, srs.compressState(state, cfg, item.factor));
+      continue;
+    }
+    const q = question(item.card_id);
+    if (!q) continue;
+    const remembered = item.chosen === q.answer && !item.guessed;
+    states.set(item.card_id, {
+      id: item.card_id, deck: q.deck,
+      ...srs.applyFeedback(states.get(item.card_id), remembered, eventParams(item), new Date(item.reviewed_at)),
+    });
+  }
+  return states;
 }
 
 // ── 同步 ──────────────────────────────────────────────
@@ -186,7 +223,7 @@ async function sync({ silent = false } = {}) {
   const dirty = (await store.kvGet("notes_dirty")) || {};
   const res = await api("/api/sync", {
     method: "POST",
-    body: JSON.stringify({ answers, notes: dirty }),
+    body: JSON.stringify({ answers, adjustments: SNAP.adjustments || [], notes: dirty }),
   });
 
   // applied 與 skipped 都代表「伺服器已經有了」；failed 是永久性失敗（例如題號不存在），
@@ -1308,6 +1345,41 @@ function customMultRow(p, off) {
     答對倍率 ${rr[0]}–${rr[1]}、答錯倍率 ${fr[0]}–${fr[1]}，超出範圍會被收回邊界。</p>`;
 }
 
+async function compressProgress() {
+  if (!SNAP.states.size || (signedIn() && !navigator.onLine)) return;
+  if (!confirm("把已答過題目的複習間隔與下次複習時間縮短一半？")) return;
+
+  const p = params();
+  const adjustment = {
+    client_action_id: eventId(),
+    applied_at: new Date().toISOString(),
+    factor: 2,
+    min_hours: p.min_hours,
+    max_hours: p.max_hours,
+  };
+  if (signedIn()) {
+    try {
+      SNAP = adopt(await api("/api/progress/compress", {
+        method: "POST",
+        body: JSON.stringify({
+          client_action_id: adjustment.client_action_id,
+          applied_at: adjustment.applied_at,
+          factor: adjustment.factor,
+        }),
+      }));
+    } catch (e) {
+      if (String(e.message).startsWith("401")) { await goLocal(); return; }
+      else return acctMsg("複習進度壓縮失敗，稍後再試。", true);
+    }
+  } else {
+    SNAP.adjustments = [...(SNAP.adjustments || []), adjustment];
+    applyAdjustmentLocally(adjustment);
+  }
+  await persist();
+  await renderSettings();
+  flash($("#set-compress"), "已縮短一半");
+}
+
 async function renderSettings() {
   const p = params();
   // 只有「登入 + 離線」才改不動設定：那時伺服器是權威，本地改了會跟它對不起來。
@@ -1354,6 +1426,12 @@ async function renderSettings() {
         <span>暫停累積${SNAP.paused && SNAP.paused_at ? `（自 ${SNAP.paused_at.slice(0, 10)}）` : ""}</span>
         <label class="toggle"><input type="checkbox" id="set-pause" ${SNAP.paused ? "checked" : ""} ${off ? "disabled" : ""}><span class="track"></span></label>
       </div>
+    </div>
+    <div class="set-block">
+      <h3>加快複習</h3>
+      <p>把已答過題目的目前複習間隔與下次複習時間縮短一半。</p>
+      <button class="btn btn-secondary" id="set-compress" ${off || !SNAP.states.size ? "disabled" : ""}>
+        ${ico("fast-forward", "ico ico-sm")}<span>壓縮複習進度 ×2</span></button>
     </div>
     <div class="set-block">
       <h3>離線可用</h3>
@@ -1404,6 +1482,7 @@ async function renderSettings() {
     if (el) el.addEventListener("change", saveMults);
   });
   $("#set-pause").addEventListener("change", (e) => setSetting({ paused: e.target.checked }));
+  $("#set-compress").addEventListener("click", compressProgress);
   bindAccountHandlers();
   $("#set-export").addEventListener("click", exportData);
   $("#set-import").addEventListener("click", () => $("#set-import-file").click());
@@ -1439,7 +1518,11 @@ async function pushLocalHistory() {
     }));
     await api("/api/sync", {
       method: "POST",
-      body: JSON.stringify({ answers, notes: i === 0 ? notes : {} }),
+      body: JSON.stringify({
+        answers,
+        adjustments: i === 0 ? (SNAP.adjustments || []) : [],
+        notes: i === 0 ? notes : {},
+      }),
     });
   }
 }
@@ -1707,6 +1790,7 @@ async function exportData() {
     version: 1,
     exported_at: new Date().toISOString(),
     events: await store.eventsAll(),
+    adjustments: SNAP.adjustments || [],
     notes: Object.fromEntries(SNAP.notes),
     settings: { preset: SNAP.preset, custom_params: SNAP.custom_params,
                 paused: SNAP.paused, paused_at: SNAP.paused_at },
@@ -1738,6 +1822,11 @@ async function importData(file) {
           typeof ev.card_id !== "string" || typeof ev.chosen !== "number" ||
           typeof ev.reviewed_at !== "string") throw new Error("event");
     }
+    if (data.adjustments !== undefined && !Array.isArray(data.adjustments)) throw new Error("adjustments");
+    for (const adjustment of data.adjustments || []) {
+      if (!adjustment || typeof adjustment.client_action_id !== "string" ||
+          typeof adjustment.applied_at !== "string" || !(adjustment.factor > 0)) throw new Error("adjustment");
+    }
   } catch {
     return acctMsg("這個檔案不是本 app 匯出的備份，或內容已損壞。", true);
   }
@@ -1750,20 +1839,13 @@ async function importData(file) {
   for (const ev of data.events) await store.eventsPut(ev);
   const all = (await store.eventsAll())
     .sort((a, b) => new Date(a.reviewed_at) - new Date(b.reviewed_at));
-  SNAP.states = new Map();
-  for (const ev of all) {
-    const q = question(ev.card_id);
-    if (!q) continue;
-    const remembered = ev.chosen === q.answer && !ev.guessed;
-    SNAP.states.set(ev.card_id, {
-      id: ev.card_id, deck: q.deck,
-      ...srs.applyFeedback(SNAP.states.get(ev.card_id), remembered,
-                           eventParams(ev), new Date(ev.reviewed_at)),
-    });
-  }
   for (const [k, v] of Object.entries(data.notes || {})) SNAP.notes.set(k, v);
   if (data.settings && data.settings.preset) SNAP.preset = data.settings.preset;
   if (data.settings && data.settings.custom_params) SNAP.custom_params = data.settings.custom_params;
+  const knownAdjustments = new Map((SNAP.adjustments || []).map((a) => [a.client_action_id, a]));
+  for (const adjustment of data.adjustments || []) knownAdjustments.set(adjustment.client_action_id, adjustment);
+  SNAP.adjustments = [...knownAdjustments.values()];
+  SNAP.states = rebuildLocalStates(all, SNAP.adjustments);
   await persist();
   if (signedIn()) {
     for (const ev of data.events) await store.outboxPut(ev);

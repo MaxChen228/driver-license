@@ -17,6 +17,7 @@ from app.srs import (
     CardState,
     ReviewSettings,
     apply_feedback,
+    compress_state,
     derive_state,
     next_interval_hours,
 )
@@ -72,6 +73,22 @@ def test_next_review_is_measured_from_answer_time():
     s = CardState.fresh(RELAXED)
     after = apply_feedback(s, True, RELAXED, NOW)
     assert after.next_review_at == NOW + timedelta(hours=168)
+
+
+def test_compress_state_halves_interval_without_erasing_history():
+    state = CardState(
+        review_interval_hours=420.0,
+        next_review_at=NOW + timedelta(days=10),
+        last_reviewed_at=NOW,
+        review_count=2,
+        lapse_count=1,
+        review_streak=1,
+        last_review_feedback=REMEMBERED,
+    )
+    compressed = compress_state(state, RELAXED)
+    assert compressed.review_interval_hours == 210.0
+    assert compressed.next_review_at == NOW + timedelta(hours=210)
+    assert (compressed.review_count, compressed.lapse_count, compressed.review_streak) == (2, 1, 1)
 
 
 def test_streak_and_lapse_transitions():

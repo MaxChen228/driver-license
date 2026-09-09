@@ -118,6 +118,27 @@ def next_interval_hours(current_hours: float, remembered: bool, cfg: ReviewSetti
     return min(cfg.max_hours, max(cfg.min_hours, base * mult))
 
 
+def compress_state(state: CardState, cfg: ReviewSettings, factor: float = 2.0) -> CardState:
+    """把已建立的複習間隔按比例縮短，保留作答次數與錯題統計。"""
+    if factor <= 0:
+        raise ValueError("compression factor must be positive")
+    if state.review_count == 0:
+        return state
+    interval = min(cfg.max_hours, max(cfg.min_hours, state.review_interval_hours / factor))
+    next_review_at = state.next_review_at
+    if state.last_reviewed_at is not None:
+        next_review_at = state.last_reviewed_at + timedelta(hours=interval)
+    return CardState(
+        review_interval_hours=interval,
+        next_review_at=next_review_at,
+        last_reviewed_at=state.last_reviewed_at,
+        review_count=state.review_count,
+        lapse_count=state.lapse_count,
+        review_streak=state.review_streak,
+        last_review_feedback=state.last_review_feedback,
+    )
+
+
 @dataclass(frozen=True)
 class CardState:
     """卡片的複習狀態。注意沒有 `state` 欄 —— 狀態是 derive 出來的（見 derive_state）。"""

@@ -242,6 +242,8 @@ EXPECTED_INDEXES = {
     "idx_event_card": "review_event",
     "idx_event_client": "review_event",
     "idx_session_user": "session",
+    "idx_adjustment_client": "progress_adjustment",
+    "idx_adjustment_user_time": "progress_adjustment",
 }
 
 

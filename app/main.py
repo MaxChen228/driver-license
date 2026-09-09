@@ -521,10 +521,17 @@ class RegradeIn(BaseModel):
     card_id: str
 
 
+class AdjustmentIn(BaseModel):
+    client_action_id: str = Field(min_length=1, max_length=128)
+    applied_at: datetime | None = None
+    factor: float = Field(default=2.0, gt=0, le=10)
+
+
 class SyncIn(BaseModel):
     # 上限不是效能考量，是「一個請求能讓伺服器做多少事」的閘門。
     # 前端補送本來就分批（每批 500 筆），正常使用永遠碰不到。
     answers: list[AnswerIn] = Field(default_factory=list, max_length=5000)
+    adjustments: list[AdjustmentIn] = Field(default_factory=list, max_length=100)
     notes: dict[str, Annotated[str, Field(max_length=4000)]] = Field(
         default_factory=dict, max_length=5000
     )
@@ -618,6 +625,31 @@ def _apply_answer(conn, user_id: int, payload: AnswerIn,
     )
 
 
+def _apply_adjustment(
+    conn, user_id: int, payload: AdjustmentIn,
+    dirty: set[tuple[str, str]] | None = None,
+) -> bool:
+    """記下一次全域壓縮，並把既有卡片排程交給事件重播重算。"""
+    if db.adjustment_exists(conn, user_id, payload.client_action_id):
+        return False
+    cfg = _cfg(conn, user_id)
+    db.log_adjustment(
+        conn, user_id,
+        client_action_id=payload.client_action_id,
+        applied_at=payload.applied_at or srs.utcnow(),
+        factor=payload.factor,
+        min_hours=cfg.min_hours,
+        max_hours=cfg.max_hours,
+    )
+    keys = db.card_keys(conn, user_id)
+    if dirty is None:
+        for card_id, deck in keys:
+            db.rebuild_card(conn, user_id, card_id, deck, cfg)
+    else:
+        dirty.update(keys)
+    return True
+
+
 @app.post("/api/answer")
 def answer(payload: AnswerIn, user: sqlite3.Row = CurrentUser):
     with db.session(write=True) as conn:
@@ -625,6 +657,14 @@ def answer(payload: AnswerIn, user: sqlite3.Row = CurrentUser):
         if payload.client_event_id and db.event_exists(conn, uid, payload.client_event_id):
             raise HTTPException(409, "duplicate client_event_id")
         return _apply_answer(conn, uid, payload)
+
+
+@app.post("/api/progress/compress")
+def compress_progress(payload: AdjustmentIn, user: sqlite3.Row = CurrentUser):
+    """把這個帳號目前已答過的卡片排程縮短一半。"""
+    with db.session(write=True) as conn:
+        _apply_adjustment(conn, user["id"], payload)
+        return _state_payload(conn, user["id"])
 
 
 @app.post("/api/answer/regrade")
@@ -658,10 +698,21 @@ def regrade(payload: RegradeIn, user: sqlite3.Row = CurrentUser):
         conn.execute(
             "DELETE FROM review_event WHERE user_id=? AND id=?", (uid, ev["id"])
         )
-        return _record(
+        result = _record(
             conn, uid, q, ev["chosen"], bool(ev["correct"]), False, ev["elapsed_ms"], before,
             db.parse(ev["reviewed_at"]), ev["client_event_id"],
         )
+        # 壓縮可能發生在這筆作答之後；重建才能把仍有效的全域調整重新套回去。
+        if db.all_adjustments(conn, uid):
+            state = db.rebuild_card(conn, uid, q["id"], q["deck"], _cfg(conn, uid))
+            result.update(
+                interval_hours=state.review_interval_hours,
+                next_review_at=db.iso(state.next_review_at),
+                review_count=state.review_count,
+                streak=state.review_streak,
+                lapse_count=state.lapse_count,
+            )
+        return result
 
 
 # ---------------------------------------------------------------- offline sync
@@ -721,6 +772,7 @@ def _state_payload(conn, user_id: int) -> dict:
         "custom_params": db.custom_params(conn, user_id),
         "paused": db.get_setting(conn, user_id, "paused", "0") == "1",
         "paused_at": db.get_setting(conn, user_id, "paused_at", "") or None,
+        "adjustments": db.all_adjustments(conn, user_id),
         "states": db.all_states(conn, user_id),
         "notes": db.all_notes(conn, user_id),
     }
@@ -779,6 +831,7 @@ def sync(payload: SyncIn, user: sqlite3.Row = CurrentUser):
     只有未預期的例外才整批回捲；補送本來就靠 client_event_id 冪等，整批重送是安全的。
     """
     applied, skipped, failed = [], [], []
+    adjustment_applied, adjustment_skipped, adjustment_failed = [], [], []
     ordered = sorted(
         payload.answers,
         key=lambda a: (a.reviewed_at or srs.utcnow(), a.client_event_id or ""),
@@ -787,12 +840,27 @@ def sync(payload: SyncIn, user: sqlite3.Row = CurrentUser):
     dirty: set[tuple[str, str]] = set()
     with db.session(write=True) as conn:
         uid = user["id"]
+        for adjustment in payload.adjustments:
+            try:
+                if _apply_adjustment(conn, uid, adjustment, dirty):
+                    adjustment_applied.append(adjustment.client_action_id)
+                else:
+                    adjustment_skipped.append(adjustment.client_action_id)
+            except HTTPException as exc:
+                adjustment_failed.append({
+                    "client_action_id": adjustment.client_action_id,
+                    "detail": exc.detail,
+                })
         for a in ordered:
             if a.client_event_id and db.event_exists(conn, uid, a.client_event_id):
                 skipped.append(a.client_event_id)
                 continue
             try:
                 _apply_answer(conn, uid, a, dirty)
+                if payload.adjustments:
+                    # 新卡的 state 是在這一批答案才建立，調整也必須納入重播。
+                    q = _question(a.card_id)
+                    dirty.add((q["id"], q["deck"]))
                 applied.append(a.client_event_id)
             except HTTPException as exc:
                 failed.append({"client_event_id": a.client_event_id, "detail": exc.detail})
@@ -824,6 +892,12 @@ def sync(payload: SyncIn, user: sqlite3.Row = CurrentUser):
         out = _state_payload(conn, uid)
 
     out["sync"] = {"applied": applied, "skipped": skipped, "failed": failed}
+    if payload.adjustments:
+        out["sync"]["adjustments"] = {
+            "applied": adjustment_applied,
+            "skipped": adjustment_skipped,
+            "failed": adjustment_failed,
+        }
     return out
 
 
