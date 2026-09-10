@@ -20,6 +20,7 @@ from app.srs import (
     apply_feedback,
     clamp_mult,
     compress_state,
+    custom_settings,
     derive_state,
     next_interval_hours,
 )
@@ -54,14 +55,17 @@ def test_forgot_shrinks_but_does_not_reset():
     assert next_interval_hours(720, False, RELAXED) == 360.0
 
 
-def test_forgot_at_floor_clamps_back_to_min():
-    """夾擠順序載重：6 × 0.5 = 3 → 夾回 6，不是 3。"""
-    assert next_interval_hours(6, False, RELAXED) == 6.0
+def test_forgot_interval_is_not_clamped_to_preset_floor():
+    assert next_interval_hours(6, False, RELAXED) == 3.0
 
 
-def test_below_floor_is_raised_before_multiplying():
-    """base = max(current, min) 先發生：1h 的卡答對是 6×2.5=15，不是 1×2.5=2.5。"""
-    assert next_interval_hours(1, True, RELAXED) == 15.0
+def test_thousandth_forgot_multiplier_is_applied_to_the_interval():
+    cfg = custom_settings(PRESETS["intensive"], remembered_mult=1.4, forgot_mult=0.001)
+    assert next_interval_hours(8, False, cfg) == 0.008
+
+
+def test_below_former_floor_is_multiplied_without_raising_first():
+    assert next_interval_hours(1, True, RELAXED) == 2.5
 
 
 def test_max_is_capped_at_60_days():
@@ -96,6 +100,21 @@ def test_compress_state_halves_interval_without_erasing_history():
     assert compressed.review_interval_hours == 210.0
     assert compressed.next_review_at == NOW + timedelta(hours=210)
     assert (compressed.review_count, compressed.lapse_count, compressed.review_streak) == (2, 1, 1)
+
+
+def test_compress_state_does_not_clamp_short_intervals():
+    state = CardState(
+        review_interval_hours=0.8,
+        next_review_at=NOW + timedelta(minutes=48),
+        last_reviewed_at=NOW,
+        review_count=1,
+        lapse_count=1,
+        review_streak=0,
+        last_review_feedback=FORGOT,
+    )
+    compressed = compress_state(state, RELAXED)
+    assert compressed.review_interval_hours == 0.4
+    assert compressed.next_review_at == NOW + timedelta(minutes=24)
 
 
 def test_streak_and_lapse_transitions():

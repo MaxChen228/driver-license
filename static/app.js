@@ -1391,15 +1391,13 @@ function customMultRow(p, off) {
     </div>
     <p class="muted set-hint">改了立刻生效，只影響之後的作答 ——
     已經排好的那些不會被重算（每筆作答都記著它當時用的倍率）。
-    答對倍率 ${rr[0]}–${rr[1]}、答錯倍率 ${fr[0]}–${fr[1]}，超出範圍會被收回邊界；預覽標示「最低間隔」代表倍率結果受到該 preset 下限限制。</p>`;
+    答對倍率 ${rr[0]}–${rr[1]}、答錯倍率 ${fr[0]}–${fr[1]}，超出範圍會被收回邊界；預覽只會在超過上限時收回。</p>`;
 }
 
 function intervalPreview(baseHours, multiplier, cfg) {
   const raw = baseHours * multiplier;
-  const interval = Math.min(cfg.max_hours, Math.max(cfg.min_hours, raw));
-  const limit = raw < cfg.min_hours
-    ? "（最低間隔）"
-    : raw > cfg.max_hours ? "（最高間隔）" : "";
+  const interval = Math.min(cfg.max_hours, raw);
+  const limit = raw > cfg.max_hours ? "（最高間隔）" : "";
   return `${fmtHours(baseHours)} × ${multiplier} → ${fmtHours(interval)}${limit}`;
 }
 
@@ -1452,7 +1450,7 @@ async function renderSettings() {
         <div><dt>首答錯</dt><dd>${intervalPreview(p.initial_hours, p.forgot_mult, p)}</dd></div>
         <div><dt>答對</dt><dd>×${p.remembered_mult}</dd></div>
         <div><dt>答錯</dt><dd>×${p.forgot_mult}</dd></div>
-        <div><dt>範圍</dt><dd>${fmtHours(p.min_hours)}–${fmtHours(p.max_hours)}</dd></div>
+        <div><dt>上限</dt><dd>${fmtHours(p.max_hours)}</dd></div>
       </dl>
       <select id="set-preset" class="input" ${off ? "disabled" : ""}>${CONFIG.presets.map((n) =>
         `<option value="${n}" ${n === SNAP.preset ? "selected" : ""}>${PRESET_LABEL[n] || n}</option>`).join("")}</select>
@@ -1535,7 +1533,7 @@ async function renderSettings() {
   });
   $("#set-preset").addEventListener("change", (e) => setSetting({ preset: e.target.value }));
   // change 而不是 input：input 會在打「1.」的中間狀態就送出（parse 成 1 → 夾到
-  // 下限 1.05），使用者還沒打完就看到數字被改掉。change 是離開輸入框／按 Enter。
+  // 倍率下界 1.05），使用者還沒打完就看到數字被改掉。change 是離開輸入框／按 Enter。
   ["#set-mult-ok", "#set-mult-bad"].forEach((sel) => {
     const el = $(sel);
     if (el) el.addEventListener("change", saveMults);
@@ -2130,6 +2128,8 @@ function esc(s) {
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 }
 function fmtHours(h) {
+  if (h < 1 / 60) return `${+(h * 3600).toFixed(1)} 秒`;
+  if (h < 1) return `${+(h * 60).toFixed(1)} 分鐘`;
   if (h < 24) return `${+h.toFixed(1)} 小時`;
   const d = h / 24;
   return d < 30 ? `${+d.toFixed(1)} 天` : `${+(d / 30).toFixed(1)} 個月`;

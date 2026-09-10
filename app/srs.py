@@ -5,8 +5,7 @@
 三個載重細節（kg 的 VocabularyReviewPolicyTests 把每個分支都釘死，別改）：
   1. 答錯是 interval × forgot_mult，不是歸零重來。排到 30 天的卡答錯回到 15 天，
      不會被打回新卡 —— 這跟 Anki 的 relearning queue 是不同哲學。
-  2. 夾擠順序：先 base = max(current, min) 再乘、再夾回 [min, max]。
-     所以在下限的卡答錯是 6 × 0.5 = 3 → 夾回 6h，不是 3h。
+  2. 作答後只套倍率並限制上限，不設最低間隔；所以 8 × 0.1 = 0.8h。
   3. 首次複習用 initial 當 base（忽略已存的 interval）；下次到期從「作答當下」
      起算，不是從原到期日起算。
 """
@@ -26,6 +25,7 @@ class ReviewSettings:
     initial_hours: float
     remembered_mult: float
     forgot_mult: float
+    # 保留於設定／事件格式，供舊資料相容；作答與壓縮不再使用最低值。
     min_hours: float
     max_hours: float
 
@@ -53,7 +53,7 @@ DEFAULT_PRESET = "relaxed"
 CUSTOM_PRESET = "custom"
 
 # 可調範圍。兩個邊界都不是美觀問題，是「排程還成不成立」的問題：
-#   答對倍率 ≤ 1 → 答對之後間隔不變或變短，卡永遠停在下限，佇列只會越長越大。
+#   答對倍率 ≤ 1 → 答對之後間隔不變或變短，佇列只會越長越大。
 #   答錯倍率 ≥ 1 → 答錯之後間隔沒縮短，這個排程就沒有在回應「你忘了」。
 # 上界純粹是防呆（×5 已經是「答對三次就排到上限」）。
 REMEMBERED_MULT_RANGE = (1.05, 5.0)
@@ -64,7 +64,7 @@ MULT_DECIMAL_PLACES = 3
 def custom_settings(base: ReviewSettings, remembered_mult: float, forgot_mult: float) -> ReviewSettings:
     """在 base（切到 custom 當下那組 preset）上換掉兩個倍率，其餘沿用。
 
-    首次間隔與上下限刻意不開放調整：這一版只做使用者要的那兩個旋鈕。五個值
+    首次間隔與時間上限刻意不開放調整：這一版只做使用者要的那兩個旋鈕。完整參數
     仍然一起存下來，日後要開放其他項不必再動一次 schema。
     """
     return ReviewSettings(
@@ -113,10 +113,10 @@ def as_params(cfg: ReviewSettings, base: str = DEFAULT_PRESET) -> dict:
 
 
 def next_interval_hours(current_hours: float, remembered: bool, cfg: ReviewSettings) -> float:
-    """kg VocabularyReviewPolicy.nextIntervalHours 的直譯。夾擠順序見模組 docstring。"""
-    base = max(current_hours, cfg.min_hours)
+    """套用一次倍率；只限制上限，讓答錯倍率能完整反映在間隔上。"""
+    base = current_hours
     mult = cfg.remembered_mult if remembered else cfg.forgot_mult
-    return min(cfg.max_hours, max(cfg.min_hours, base * mult))
+    return min(cfg.max_hours, base * mult)
 
 
 def compress_state(state: CardState, cfg: ReviewSettings, factor: float = 2.0) -> CardState:
@@ -125,7 +125,7 @@ def compress_state(state: CardState, cfg: ReviewSettings, factor: float = 2.0) -
         raise ValueError("compression factor must be positive")
     if state.review_count == 0:
         return state
-    interval = min(cfg.max_hours, max(cfg.min_hours, state.review_interval_hours / factor))
+    interval = min(cfg.max_hours, state.review_interval_hours / factor)
     next_review_at = state.next_review_at
     if state.last_reviewed_at is not None:
         next_review_at = state.last_reviewed_at + timedelta(hours=interval)
@@ -177,7 +177,7 @@ def apply_feedback(
     """套用一次作答，回傳新狀態。純函式，不碰 DB。"""
     base = cfg.initial_hours if state.review_count == 0 else state.review_interval_hours
     interval = (
-        min(cfg.max_hours, max(cfg.min_hours, FIRST_REMEMBERED_HOURS))
+        min(cfg.max_hours, FIRST_REMEMBERED_HOURS)
         if state.review_count == 0 and remembered
         else next_interval_hours(base, remembered, cfg)
     )

@@ -49,7 +49,7 @@ def test_custom_multipliers_take_effect_on_the_next_answer(client):
     r = _answer_card(client, cid, correct=True)
     assert r["interval_hours"] == 336.0    # 後續從 168h 繼續 ×2.0
     _, r = _answer(client, correct=False)
-    assert r["interval_hours"] == 6.0      # 24 × 0.25 = 6，正好在下限上
+    assert r["interval_hours"] == 6.0      # 24 × 0.25 = 6
 
 
 def test_out_of_range_multipliers_are_clamped_not_rejected(client):

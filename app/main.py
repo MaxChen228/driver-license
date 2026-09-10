@@ -1132,7 +1132,7 @@ def stats(deck: str = Query(...), user: sqlite3.Row = CurrentUser):
 
 
 class CustomParamsIn(BaseModel):
-    """使用者自己調的兩個倍率。其餘三個值（首次、上下限）沿用切換當下那組
+    """使用者自己調的兩個倍率。其餘參數沿用切換當下那組
     preset，不由前端指定 —— 這一版只開放這兩個旋鈕，少一個能被亂餵的入口。"""
 
     base: str | None = None

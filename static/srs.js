@@ -34,7 +34,7 @@ const DEFAULT_PRESET = "relaxed";
 // 伺服器端是 review_event.preset_params）。詳見 app/srs.py 的同一段註解。
 const CUSTOM_PRESET = "custom";
 
-// 可調範圍。答對倍率 ≤ 1 → 答對之後間隔不變或變短，卡永遠停在下限；
+// 可調範圍。答對倍率 ≤ 1 → 答對之後間隔不變或變短；
 // 答錯倍率 ≥ 1 → 答錯之後間隔沒縮短。兩者都會讓排程失去意義，所以是硬邊界。
 const REMEMBERED_MULT_RANGE = [1.05, 5.0];
 const FORGOT_MULT_RANGE = [0.001, 0.95];
@@ -81,18 +81,17 @@ function asParams(cfg, base = DEFAULT_PRESET) {
   };
 }
 
-// 夾擠順序有意義：先 base = max(current, min) 再乘、再夾回 [min, max]。
-// 在下限的卡答錯是 6 × 0.5 = 3 → 夾回 6h，不是 3h。
+// 作答後只套倍率並限制上限，不設最低間隔；所以 8 × 0.1 = 0.8h。
 function nextIntervalHours(currentHours, remembered, cfg) {
-  const base = Math.max(currentHours, cfg.min_hours);
+  const base = currentHours;
   const mult = remembered ? cfg.remembered_mult : cfg.forgot_mult;
-  return Math.min(cfg.max_hours, Math.max(cfg.min_hours, base * mult));
+  return Math.min(cfg.max_hours, base * mult);
 }
 
 function compressState(state, cfg, factor = 2) {
   if (!state || !state.review_count) return state;
   if (!(factor > 0)) throw new Error("compression factor must be positive");
-  const interval = Math.min(cfg.max_hours, Math.max(cfg.min_hours, state.interval_hours / factor));
+  const interval = Math.min(cfg.max_hours, state.interval_hours / factor);
   const next = state.last_reviewed_at
     ? new Date(new Date(state.last_reviewed_at).getTime() + interval * 3600e3).toISOString()
     : state.next_review_at;
@@ -115,7 +114,7 @@ function applyFeedback(state, remembered, cfg, now) {
   };
   const base = s.review_count === 0 ? cfg.initial_hours : s.interval_hours;
   const interval = s.review_count === 0 && remembered
-    ? Math.min(cfg.max_hours, Math.max(cfg.min_hours, FIRST_REMEMBERED_HOURS))
+    ? Math.min(cfg.max_hours, FIRST_REMEMBERED_HOURS)
     : nextIntervalHours(base, remembered, cfg);
   return {
     interval_hours: interval,

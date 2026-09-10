@@ -167,7 +167,7 @@ def test_seeded_empty_cards_are_dropped_and_progress_is_replayed_to_current_poli
         "2026-07-20T02:00:00+00:00", 2, 0, 2, 1,
     )
     assert rows[1] == (
-        1, "M0001", "moto", 4.0, "2026-07-20T07:00:00+00:00",
+        1, "M0001", "moto", 2.8, "2026-07-20T05:48:00+00:00",
         "2026-07-20T03:00:00+00:00", 1, 1, 0, 0,
     )
 

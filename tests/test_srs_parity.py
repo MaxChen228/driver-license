@@ -30,12 +30,12 @@ CASES = [
     (999.0, 0, True, "relaxed"),   # 首次複習忽略已存的 interval
     (60.0, 1, True, "relaxed"),
     (720.0, 5, False, "relaxed"),  # 答錯是 ×0.5，不是歸零
-    (6.0, 3, False, "relaxed"),    # 在下限答錯：6×0.5=3 → 夾回 6
-    (1.0, 3, True, "relaxed"),     # 低於下限先抬到 min 再乘
+    (6.0, 3, False, "relaxed"),    # 答錯不受原下限限制：6×0.5=3
+    (1.0, 3, True, "relaxed"),     # 低於原下限也直接乘倍率
     (1000.0, 9, True, "relaxed"),  # 撞上限 1440
     (8.0, 0, True, "intensive"),
     (8.0, 0, False, "intensive"),
-    (4.0, 2, False, "intensive"),  # intensive 下限
+    (4.0, 2, False, "intensive"),  # intensive 原下限不再限制作答結果
 ]
 
 HARNESS = """
