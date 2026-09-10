@@ -157,10 +157,16 @@
 
   <!-- ── 統計 ───────────────────────────────────────────── -->
   <section id="view-stats" class="view" hidden>
-    <label>
-      <span class="field-label">題庫</span>
-      <select id="st-deck" class="input"></select>
-    </label>
+    <div class="stats-controls">
+      <label>
+        <span class="field-label">題庫</span>
+        <select id="st-deck" class="input"></select>
+      </label>
+      <div>
+        <span class="field-label">觀測尺度</span>
+        <div id="st-scale" class="segmented" role="group" aria-label="觀測尺度"></div>
+      </div>
+    </div>
     <div id="st-body"></div>
   </section>
 

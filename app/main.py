@@ -24,11 +24,11 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
-from . import auth, db, ratelimit, srs
+from . import auth, db, ratelimit, srs, timeline
 from .deck import DATA_DIR, DECKS, load_decks
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -72,6 +72,7 @@ print(
 # 只有登入的人有伺服器端資料，所以幾乎每個 API 都掛這個相依。
 # 型別上就拿不到「沒有 user 的 conn 操作」——db.* 每個函式都要求指名 user_id。
 CurrentUser = Depends(auth.require_user)
+StatsScale = Literal["day", "hour", "minute"]
 
 
 def _cfg(conn, user_id: int) -> srs.ReviewSettings:
@@ -1049,7 +1050,11 @@ def browse(
 
 
 @app.get("/api/stats")
-def stats(deck: str = Query(...), user: sqlite3.Row = CurrentUser):
+def stats(
+    deck: str = Query(...),
+    scale: StatsScale = Query("day"),
+    user: sqlite3.Row = CurrentUser,
+):
     d = _deck_or_404(deck)
     with db.session() as conn:
         uid = user["id"]
@@ -1057,6 +1062,7 @@ def stats(deck: str = Query(...), user: sqlite3.Row = CurrentUser):
 
         # 14 日到期預測（今天以前全部收攏進今天，照 kg 的 forecast 做法）
         forecast: Counter[str] = Counter()
+        forecast_items = []
         for r in _rows(conn, uid, deck):
             # 題庫改版刪掉的題號會留下孤兒列，別讓它們出現在預測裡
             if r["review_count"] == 0 or r["card_id"] not in d.by_id:
@@ -1064,12 +1070,13 @@ def stats(deck: str = Query(...), user: sqlite3.Row = CurrentUser):
             nxt = db.parse(r["next_review_at"])
             if nxt is None:
                 continue
+            forecast_items.append((nxt, None))
             day = max((nxt.date() - now.date()).days, 0)
             if day < 14:
                 forecast[(now.date() + timedelta(days=day)).isoformat()] += 1
 
         rows = conn.execute(
-            """SELECT day_key, COUNT(*) n, SUM(correct) ok FROM review_event
+            """SELECT reviewed_at, day_key, correct FROM review_event
                WHERE user_id=? AND deck=?
                  AND NOT EXISTS (
                    SELECT 1 FROM progress_reset pr
@@ -1077,10 +1084,18 @@ def stats(deck: str = Query(...), user: sqlite3.Row = CurrentUser):
                      AND pr.card_id=review_event.card_id
                      AND julianday(pr.reset_at) >= julianday(review_event.reviewed_at)
                  )
-               GROUP BY day_key ORDER BY day_key""",
+               ORDER BY reviewed_at""",
             (uid, deck),
         ).fetchall()
-        activity = [{"day": r["day_key"], "count": r["n"], "correct": r["ok"] or 0} for r in rows]
+        activity_items = []
+        activity_by_day: dict[str, dict[str, int | str]] = {}
+        for r in rows:
+            day = r["day_key"]
+            rec = activity_by_day.setdefault(day, {"day": day, "count": 0, "correct": 0})
+            rec["count"] += 1
+            rec["correct"] += int(r["correct"])
+            activity_items.append((db.parse(r["reviewed_at"]), bool(r["correct"])))
+        activity = sorted(activity_by_day.values(), key=lambda a: a["day"])
 
         # 連續天數（往回數到第一個沒作答的日子）
         days = {a["day"] for a in activity}
@@ -1106,6 +1121,8 @@ def stats(deck: str = Query(...), user: sqlite3.Row = CurrentUser):
             if q_:
                 by_cat[q_["category"]] += r["lapse_count"]
 
+        timeline_data = timeline.build_timeline(now, scale, activity_items, forecast_items)
+
     total = sum(a["count"] for a in activity)
     ok = sum(a["correct"] for a in activity)
     return {
@@ -1118,6 +1135,7 @@ def stats(deck: str = Query(...), user: sqlite3.Row = CurrentUser):
              "count": forecast.get((now.date() + timedelta(days=i)).isoformat(), 0)}
             for i in range(14)
         ],
+        "timeline": timeline_data,
         "activity": activity[-180:],
         "worst_cards": [
             {"id": r["card_id"], "lapses": r["lapse_count"]}

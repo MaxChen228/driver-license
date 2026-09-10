@@ -149,8 +149,18 @@ def test_stats_shape(client):
     s = client.get("/api/stats", params={"deck": "moto"}).json()
     assert s["answered_total"] >= 2
     assert len(s["forecast_14d"]) == 14
+    assert s["timeline"]["scale"] == "day"
+    assert len(s["timeline"]["past"]) == 14
+    assert len(s["timeline"]["future"]) == 14
     assert s["streak_days"] >= 1
     assert 0.0 <= s["accuracy"] <= 1.0
+
+    minute = client.get("/api/stats", params={"deck": "moto", "scale": "minute"})
+    assert minute.status_code == 200
+    assert minute.json()["timeline"]["scale"] == "minute"
+    assert len(minute.json()["timeline"]["past"]) == 60
+    assert len(minute.json()["timeline"]["future"]) == 60
+    assert client.get("/api/stats", params={"deck": "moto", "scale": "week"}).status_code == 422
 
 
 def test_app_shell_is_never_heuristically_cached(client):

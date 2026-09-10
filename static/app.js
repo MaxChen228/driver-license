@@ -1149,9 +1149,23 @@ $("#br-list").addEventListener("click", (e) => {
 $("#br-deck").addEventListener("change", renderBrowse);
 
 // ── 統計 ──────────────────────────────────────────────
+const STATS_SCALES = Object.freeze({
+  day: Object.freeze({ key: "day", label: "日", buckets: 14, stepMs: 864e5, labelEvery: 2, windowLabel: "14 天" }),
+  hour: Object.freeze({ key: "hour", label: "時", buckets: 24, stepMs: 3600e3, labelEvery: 4, windowLabel: "24 小時" }),
+  minute: Object.freeze({ key: "minute", label: "分", buckets: 60, stepMs: 60e3, labelEvery: 10, windowLabel: "60 分鐘" }),
+});
+let STATS_SCALE = "day";
+let statsRenderId = 0;
+
 async function renderStats() {
   fillDeckSelect("#st-deck");
   const deck = $("#st-deck").value;
+  const renderId = ++statsRenderId;
+  const scale = STATS_SCALES[STATS_SCALE];
+  $("#st-scale").innerHTML = Object.values(STATS_SCALES).map((s) =>
+    `<button type="button" class="seg-btn${s.key === STATS_SCALE ? " active" : ""}"
+       data-scale="${s.key}" aria-pressed="${s.key === STATS_SCALE}">${s.label}</button>`
+  ).join("");
   // 先切畫面，資料晚一點填。原本整段算完才 show()：登入時中間卡著一次
   // /api/stats，那段時間畫面還停在上一頁 —— 按了返回或按了「統計」看起來
   // 像沒反應，慢的網路上會被連按第二次。切換必須是立即的。
@@ -1161,13 +1175,17 @@ async function renderStats() {
   // 含有完整歷史，正確率與連續天數一樣算得出來。
   let s = null;
   try {
-    if (signedIn() && navigator.onLine) s = await api(`/api/stats?deck=${deck}`);
+    if (signedIn() && navigator.onLine) {
+      s = await api(`/api/stats?deck=${encodeURIComponent(deck)}&scale=${STATS_SCALE}`);
+    }
   } catch { /* 離線就用本地能算的那部分 */ }
 
   const local = await localStats(deck);
-  const forecast = s ? s.forecast_14d : local.forecast;
+  if (renderId !== statsRenderId || CURRENT !== "stats") return;
+  const timeline = (s && s.timeline) || local.timeline;
+  const forecast = timeline.future;
   const worst = s ? s.worst_categories : local.worst;
-  const activity = activityWindow(s ? s.activity : local.activity);
+  const activity = timeline.past;
   const max = Math.max(1, ...forecast.map((f) => f.count));
   const actMax = Math.max(1, ...activity.map((a) => a.count));
   const actTotal = activity.reduce((n, a) => n + a.count, 0);
@@ -1180,17 +1198,17 @@ async function renderStats() {
       <div class="tile"><b>${s ? s.streak_days : local.streak}</b><span>連續天數</span></div>
     </div>
 
-    <div class="sec">最近 14 天做了多少<span class="sec-note">共 ${actTotal} 題</span></div>
+    <div class="sec">最近 ${scale.windowLabel} 做了多少<span class="sec-note">共 ${actTotal} 題</span></div>
     <div class="chart"><div class="bars">${barChart(activity, actMax, true)}</div></div>
-    ${dayLabels(activity, true)}
+    ${timelineLabels(activity, true, scale)}
     <p class="legend">
       <span><i class="dot ok"></i>答對</span>
       <span><i class="dot bad"></i>答錯</span>
     </p>
 
-    <div class="sec">未來 14 天到期量<span class="sec-note">尖峰 ${max} 題</span></div>
+    <div class="sec">未來 ${scale.windowLabel} 到期量<span class="sec-note">尖峰 ${max} 題</span></div>
     <div class="chart"><div class="bars">${barChart(forecast, max, false)}</div></div>
-    ${dayLabels(forecast)}
+    ${timelineLabels(forecast, false, scale)}
 
     <div class="sec">最常答錯的分類<span class="sec-note">點一列直接複習</span></div>
     ${worst.length
@@ -1205,6 +1223,14 @@ async function renderStats() {
   // 而且沒有錯誤訊息，只是圖表變成一條線。CSSOM 賦值不受 CSP 管。
   //
   // 統計不該只能看 —— 點分類直接開一輪那個分類的複習
+  $("#st-scale").querySelectorAll("[data-scale]").forEach((b) =>
+    b.addEventListener("click", () => {
+      if (b.dataset.scale !== STATS_SCALE) {
+        STATS_SCALE = b.dataset.scale;
+        renderStats();
+      }
+    })
+  );
   $("#st-body").querySelectorAll("[data-cat]").forEach((b) =>
     b.addEventListener("click", () => startSession(deck, "all", b.dataset.cat))
   );
@@ -1249,34 +1275,55 @@ function barChart(rows, max, split) {
   }).join("");
 }
 
-// 日期標籤每隔一格印一個（14 格全印在手機上會疊在一起）。
-// fromEnd 決定從哪一端開始隔：兩張圖的「今天」在不同邊 —— 作答量是往回看
-// （今天在最右），到期預測是往前看（今天在最左）。從錯的那端隔的話，今天
-// 那一格剛好落在偶數／奇數的另一邊而沒有標籤，而那是最需要標的一格。
-function dayLabels(rows, fromEnd = false) {
+// 兩張圖共用同一套時間標籤規則；fromEnd 讓「現在」在兩張圖都一定有標籤。
+function timelineLabels(rows, fromEnd, scale) {
   const last = rows.length - 1;
   return `<div class="barlabels">${rows
     .map((r, i) => {
       const step = fromEnd ? last - i : i;
-      return `<span>${step % 2 ? "" : r.day.slice(8)}</span>`;
+      return `<span>${step % scale.labelEvery ? "" : timelineLabel(r.at, scale)}</span>`;
     })
     .join("")}</div>`;
 }
 
-// 把每日紀錄對齊成「最近 14 天」的固定長度序列，沒作答的日子補 0。
-// 伺服器的 activity 只含有紀錄的日子（而且最多 180 筆），直接畫會把空白日
-// 壓縮掉，看起來像天天都有做。日界用 UTC，跟 day_key 與 14 天預測同一套。
-function activityWindow(rows, days = 14) {
-  const byDay = new Map((rows || []).map((a) => [a.day, a]));
-  const now = refNow();
-  const day0 = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
-  const out = [];
-  for (let i = days - 1; i >= 0; i -= 1) {
-    const day = new Date(day0 - i * 86400e3).toISOString().slice(0, 10);
-    const a = byDay.get(day);
-    out.push({ day, count: a ? a.count : 0, correct: a ? a.correct : 0 });
+function timelineLabel(iso, scale) {
+  const d = new Date(iso);
+  if (scale.key === "day") return String(d.getUTCDate()).padStart(2, "0");
+  return `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`;
+}
+
+// 兩張圖共用同一套固定長度時間桶；差別只有輸入項目與方向。
+function timelineFromItems(items, now, scale, direction) {
+  const nowMs = now.getTime();
+  const anchor = Math.floor(nowMs / scale.stepMs) * scale.stepMs;
+  const origin = direction === "future"
+    ? anchor
+    : anchor - (scale.buckets - 1) * scale.stepMs;
+  const rows = Array.from({ length: scale.buckets }, (_, i) => ({
+    at: new Date(origin + i * scale.stepMs).toISOString(), count: 0, correct: 0,
+  }));
+
+  for (const item of items) {
+    const atMs = new Date(item.at).getTime();
+    if (!Number.isFinite(atMs)) continue;
+    if (direction === "past" && atMs > nowMs) continue;
+    const bucket = Math.floor(atMs / scale.stepMs) * scale.stepMs;
+    let index = Math.floor((bucket - origin) / scale.stepMs);
+    if (direction === "future" && index < 0) index = 0;
+    if (index < 0 || index >= rows.length) continue;
+    rows[index].count += 1;
+    if (item.correct === true) rows[index].correct += 1;
   }
-  return out;
+  return rows;
+}
+
+function buildStatsTimeline(activityItems, dueItems, now, scaleKey) {
+  const scale = STATS_SCALES[scaleKey];
+  return {
+    scale: scale.key,
+    past: timelineFromItems(activityItems, now, scale, "past"),
+    future: timelineFromItems(dueItems, now, scale, "future"),
+  };
 }
 
 function accuracyText(server, local) {
@@ -1288,15 +1335,7 @@ function accuracyText(server, local) {
 // 沒有「答過幾次、對幾次、哪幾天答的」。events 兩種模式都寫，所以匿名也有得算。
 async function localStats(deck) {
   const now = refNow();
-  // 日界用 UTC，不是本地。原本 day0 取本地午夜、再用 toISOString() 印成標籤 ——
-  // UTC+8 的本地午夜等於前一天 16:00Z，於是整排日期退一天：實測今天 7/28、
-  // X 軸第一格卻標 27，卡片說「3 天後（7/31）」而長條落在標著 30 的格子上。
-  // 對齊伺服器而不是改成本地：app/main.py 的 forecast_14d 與 day_key 都取 UTC 的
-  // date()，上面算連續天數的地方也已經為了同一個理由用 UTC。兩邊必須是同一套，
-  // 否則同一個人登入前後會看到兩張不一樣的圖。
-  const utcDay = (d) => Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
-  const day0 = utcDay(now);
-  const buckets = new Array(14).fill(0);
+  const forecastItems = [];
   let answered = 0;
   const worst = new Map();
 
@@ -1305,15 +1344,13 @@ async function localStats(deck) {
     if (!st || !st.review_count) continue;
     answered += st.review_count;
     if (st.lapse_count) worst.set(q.category, (worst.get(q.category) || 0) + st.lapse_count);
-    if (!st.next_review_at) continue;
-    const idx = Math.max(0, Math.round((utcDay(new Date(st.next_review_at)) - day0) / 86400e3));
-    if (idx < 14) buckets[idx] += 1;
+    if (st.next_review_at) forecastItems.push({ at: st.next_review_at });
   }
 
   let total = 0;
   let ok = 0;
   const days = new Set();
-  const byDay = new Map();
+  const activityItems = [];
   const resetAt = new Map();
   for (const reset of SNAP.resets || []) {
     const at = new Date(reset.reset_at);
@@ -1324,14 +1361,9 @@ async function localStats(deck) {
     if (!q || q.deck !== deck) continue;
     if (resetAt.has(ev.card_id) && new Date(ev.reviewed_at) <= resetAt.get(ev.card_id)) continue;
     total += 1;
-    if (ev.chosen === q.answer) ok += 1;
-    // 每日作答量與答對數。伺服器那邊叫 activity（day / count / correct），
-    // 欄位名對齊，前端才不需要為兩種模式各寫一份圖表。
-    const key = ev.reviewed_at.slice(0, 10);
-    const rec = byDay.get(key) || { day: key, count: 0, correct: 0 };
-    rec.count += 1;
-    if (ev.chosen === q.answer) rec.correct += 1;
-    byDay.set(key, rec);
+    const correct = ev.chosen === q.answer;
+    if (correct) ok += 1;
+    activityItems.push({ at: ev.reviewed_at, correct });
     // 用 UTC 日期，跟伺服器的 day_key 同一套（app/main.py 拿 UTC 的 date()）。
     // 這裡若改用當地時區，同一個人登入前後看到的連續天數會不一樣 ——
     // 一致比「對」更重要，而伺服器那份是權威。
@@ -1346,10 +1378,7 @@ async function localStats(deck) {
     answered: total || answered,
     accuracy: total ? ok / total : null,
     streak,
-    activity: [...byDay.values()].sort((a, b) => a.day.localeCompare(b.day)),
-    forecast: buckets.map((count, i) => ({
-      day: new Date(day0 + i * 86400e3).toISOString().slice(0, 10), count,
-    })),
+    timeline: buildStatsTimeline(activityItems, forecastItems, now, STATS_SCALE),
     worst: [...worst.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10)
       .map(([category, lapses]) => ({ category, lapses })),
   };

@@ -18,7 +18,7 @@
 // 而新的 ?v= 網址還沒被快取過。若使用者剛好在那一刻離線，loadBanks 會失敗、
 // 開機直接掉進「這台裝置還沒下載過題庫」。加 VERSION 會重跑 install，一次補齊。
 
-const VERSION = "v13";
+const VERSION = "v14";
 const SHELL_CACHE = `shell-${VERSION}`;
 const ASSET_CACHE = `assets-${VERSION}`;   // 題庫與圖片；換版本會整批重抓，
                                            // 這是題庫改版時唯一能讓舊圖失效的手段

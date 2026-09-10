@@ -712,6 +712,23 @@ main {
 .dot.bad { background: var(--color-accent); border-color: var(--color-accent); }
 
 /* ── stats ──────────────────────────────────────────────────────────── */
+.stats-controls {
+  display: flex; align-items: end; gap: var(--space-3); margin-bottom: var(--space-4);
+}
+.stats-controls > label { flex: 1; min-width: 0; }
+.segmented { display: flex; min-height: 44px; }
+.seg-btn {
+  min-width: 48px; min-height: 44px; padding: 8px var(--space-3);
+  color: var(--color-text); background: var(--color-bg);
+  border: 1px solid var(--color-divider); font: inherit; cursor: pointer;
+}
+.seg-btn + .seg-btn { border-left: 0; }
+.seg-btn:hover { background: var(--tint-1); }
+.seg-btn:focus-visible { position: relative; z-index: 1; outline: 2px solid var(--color-accent); outline-offset: 0; }
+.seg-btn.active { color: var(--plate-fg); background: var(--color-accent); border-color: var(--color-accent); }
+@media (max-width: 420px) {
+  .stats-controls { align-items: stretch; flex-direction: column; }
+}
 .tiles {
   display: grid; grid-template-columns: repeat(3, 1fr);
   border: 1px solid var(--color-divider); background: var(--color-surface);
