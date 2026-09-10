@@ -10,6 +10,7 @@ import pytest
 from app.srs import (
     DUE,
     FORGOT,
+    FORGOT_MULT_RANGE,
     PRESETS,
     REMEMBERED,
     REVIEWED,
@@ -17,6 +18,7 @@ from app.srs import (
     CardState,
     ReviewSettings,
     apply_feedback,
+    clamp_mult,
     compress_state,
     derive_state,
     next_interval_hours,
@@ -36,6 +38,11 @@ def test_intensive_preset_matches_kg():
     assert (c.initial_hours, c.remembered_mult, c.forgot_mult, c.min_hours, c.max_hours) == (
         8.0, 1.4, 0.35, 4.0, 1440.0,
     )
+
+
+def test_forgot_multiplier_supports_thousandths():
+    assert clamp_mult(0.001, FORGOT_MULT_RANGE) == 0.001
+    assert clamp_mult(0.0001, FORGOT_MULT_RANGE) == 0.001
 
 
 def test_remembered_multiplies():

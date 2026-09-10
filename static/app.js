@@ -1372,7 +1372,6 @@ function customMultRow(p, off) {
   // 直接把數字換算成「下一次會排到多久」—— ×1.4 對一般人不是一個有感覺的量。
   // 答對倍率現在從「第一次就會」的 7 天繼續乘；答錯仍用 preset 的初始間隔當基準。
   const okBase = srs.FIRST_REMEMBERED_HOURS;
-  const preview = (base, mult) => fmtHours(Math.min(p.max_hours, Math.max(p.min_hours, base * mult)));
   return `
     <div class="mults">
       <label class="mult">
@@ -1380,19 +1379,28 @@ function customMultRow(p, off) {
         <input id="set-mult-ok" class="input" type="number" inputmode="decimal"
                min="${rr[0]}" max="${rr[1]}" step="0.05" value="${p.remembered_mult}"
                ${off ? "disabled" : ""}>
-        <span class="mult-note">${fmtHours(okBase)} → ${preview(okBase, p.remembered_mult)}</span>
+        <span class="mult-note">${intervalPreview(okBase, p.remembered_mult, p)}</span>
       </label>
       <label class="mult">
         <span class="field-label">答錯 ×</span>
         <input id="set-mult-bad" class="input" type="number" inputmode="decimal"
-               min="${fr[0]}" max="${fr[1]}" step="0.05" value="${p.forgot_mult}"
+               min="${fr[0]}" max="${fr[1]}" step="0.001" value="${p.forgot_mult}"
                ${off ? "disabled" : ""}>
-        <span class="mult-note">${fmtHours(p.initial_hours)} → ${preview(p.initial_hours, p.forgot_mult)}</span>
+        <span class="mult-note">${intervalPreview(p.initial_hours, p.forgot_mult, p)}</span>
       </label>
     </div>
     <p class="muted set-hint">改了立刻生效，只影響之後的作答 ——
     已經排好的那些不會被重算（每筆作答都記著它當時用的倍率）。
-    答對倍率 ${rr[0]}–${rr[1]}、答錯倍率 ${fr[0]}–${fr[1]}，超出範圍會被收回邊界。</p>`;
+    答對倍率 ${rr[0]}–${rr[1]}、答錯倍率 ${fr[0]}–${fr[1]}，超出範圍會被收回邊界；預覽標示「最低間隔」代表倍率結果受到該 preset 下限限制。</p>`;
+}
+
+function intervalPreview(baseHours, multiplier, cfg) {
+  const raw = baseHours * multiplier;
+  const interval = Math.min(cfg.max_hours, Math.max(cfg.min_hours, raw));
+  const limit = raw < cfg.min_hours
+    ? "（最低間隔）"
+    : raw > cfg.max_hours ? "（最高間隔）" : "";
+  return `${fmtHours(baseHours)} × ${multiplier} → ${fmtHours(interval)}${limit}`;
 }
 
 async function compressProgress() {
@@ -1441,7 +1449,7 @@ async function renderSettings() {
       <h3>複習節奏</h3>
       <dl class="kv">
         <div><dt>首答對</dt><dd>${fmtHours(srs.FIRST_REMEMBERED_HOURS)}</dd></div>
-        <div><dt>首答錯</dt><dd>${fmtHours(Math.min(p.max_hours, Math.max(p.min_hours, p.initial_hours * p.forgot_mult)))}</dd></div>
+        <div><dt>首答錯</dt><dd>${intervalPreview(p.initial_hours, p.forgot_mult, p)}</dd></div>
         <div><dt>答對</dt><dd>×${p.remembered_mult}</dd></div>
         <div><dt>答錯</dt><dd>×${p.forgot_mult}</dd></div>
         <div><dt>範圍</dt><dd>${fmtHours(p.min_hours)}–${fmtHours(p.max_hours)}</dd></div>

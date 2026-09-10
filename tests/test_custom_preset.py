@@ -62,7 +62,7 @@ def test_out_of_range_multipliers_are_clamped_not_rejected(client):
         "custom_params": {"remembered_mult": 99, "forgot_mult": 0.0001}
     }).json()
     assert s["params"]["remembered_mult"] == srs.REMEMBERED_MULT_RANGE[1]
-    assert s["params"]["forgot_mult"] == srs.FORGOT_MULT_RANGE[0]
+    assert s["params"]["forgot_mult"] == 0.001
 
     s = client.put("/api/settings", json={
         "custom_params": {"remembered_mult": 0.5, "forgot_mult": 5}

@@ -37,12 +37,14 @@ const CUSTOM_PRESET = "custom";
 // 可調範圍。答對倍率 ≤ 1 → 答對之後間隔不變或變短，卡永遠停在下限；
 // 答錯倍率 ≥ 1 → 答錯之後間隔沒縮短。兩者都會讓排程失去意義，所以是硬邊界。
 const REMEMBERED_MULT_RANGE = [1.05, 5.0];
-const FORGOT_MULT_RANGE = [0.1, 0.95];
+const FORGOT_MULT_RANGE = [0.001, 0.95];
+const MULT_DECIMAL_PLACES = 3;
 
 function clampMult(value, range) {
   const n = Number(value);
   if (!Number.isFinite(n)) return range[0];
-  return Math.round(Math.min(range[1], Math.max(range[0], n)) * 100) / 100;
+  const scale = 10 ** MULT_DECIMAL_PLACES;
+  return Math.round(Math.min(range[1], Math.max(range[0], n)) * scale) / scale;
 }
 
 function params(preset) {
@@ -129,6 +131,6 @@ function applyFeedback(state, remembered, cfg, now) {
 export {
   FORGOT, REMEMBERED, FIRST_REMEMBERED_HOURS, UNLEARNED, DUE, REVIEWED,
   PRESETS, DEFAULT_PRESET, CUSTOM_PRESET, params, resolve, asParams,
-  REMEMBERED_MULT_RANGE, FORGOT_MULT_RANGE, clampMult,
+  REMEMBERED_MULT_RANGE, FORGOT_MULT_RANGE, MULT_DECIMAL_PLACES, clampMult,
   nextIntervalHours, compressState, deriveState, applyFeedback,
 };

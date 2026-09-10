@@ -57,7 +57,8 @@ CUSTOM_PRESET = "custom"
 #   答錯倍率 ≥ 1 → 答錯之後間隔沒縮短，這個排程就沒有在回應「你忘了」。
 # 上界純粹是防呆（×5 已經是「答對三次就排到上限」）。
 REMEMBERED_MULT_RANGE = (1.05, 5.0)
-FORGOT_MULT_RANGE = (0.1, 0.95)
+FORGOT_MULT_RANGE = (0.001, 0.95)
+MULT_DECIMAL_PLACES = 3
 
 
 def custom_settings(base: ReviewSettings, remembered_mult: float, forgot_mult: float) -> ReviewSettings:
@@ -77,7 +78,7 @@ def custom_settings(base: ReviewSettings, remembered_mult: float, forgot_mult: f
 
 def clamp_mult(value: float, rng: tuple[float, float]) -> float:
     lo, hi = rng
-    return round(min(hi, max(lo, float(value))), 2)
+    return round(min(hi, max(lo, float(value))), MULT_DECIMAL_PLACES)
 
 
 def resolve(name: str, params: dict | None = None) -> ReviewSettings:
