@@ -31,6 +31,16 @@ DATA_DIR = Path(os.environ.get("DL_DATA_DIR", Path.home() / "driver-license-data
 
 SCHEMA_VERSION = 7
 
+# 每個帳號的日誌上限。三張表都是「只增不減」，而且每一列都會在重算時被讀回來，
+# 沒有上限就是讓任何一個註冊帳號決定磁碟與 CPU 的上限。
+#   作答：2032 題 × 每題一生答 ~100 次，正常人到不了。
+#   重置／壓縮：前端每次同步都把「全部」重送（冪等），所以上限必須低於
+#   main.SyncIn 的單次請求上限，否則碰到上限的帳號每次同步都會 422、永遠卡住。
+#   壓縮另外有 CPU 面：亂序重算時每張卡都要走過全部壓縮（K × A）。
+MAX_EVENTS_PER_USER = 200_000
+MAX_RESETS_PER_USER = 4_000
+MAX_ADJUSTMENTS_PER_USER = 100
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS user (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -670,6 +680,85 @@ def all_resets(conn: sqlite3.Connection, user_id: int) -> list[dict]:
     ]
 
 
+def log_counts(conn: sqlite3.Connection, user_id: int) -> tuple[int, int, int]:
+    """(作答, 重置, 壓縮) 各幾列。三個都走 (user_id, ...) 開頭的索引。"""
+    return tuple(
+        conn.execute(f"SELECT COUNT(*) FROM {table} WHERE user_id=?", (user_id,)).fetchone()[0]
+        for table in ("review_event", "progress_reset", "progress_adjustment")
+    )
+
+
+def _parsed_adjustments(conn: sqlite3.Connection, user_id: int) -> list[tuple]:
+    return [
+        (parse(r["applied_at"]), 0, r["client_action_id"], "adjustment", r)
+        for r in all_adjustments(conn, user_id)
+    ]
+
+
+def _parsed_resets_by_card(conn: sqlite3.Connection, user_id: int) -> dict[str, list[tuple]]:
+    out: dict[str, list[tuple]] = {}
+    for r in all_resets(conn, user_id):
+        out.setdefault(r["card_id"], []).append(
+            (parse(r["reset_at"]), 0, r["client_action_id"], "reset", r)
+        )
+    return out
+
+
+def latest_log_time(conn: sqlite3.Connection, user_id: int) -> datetime | None:
+    """這個帳號日誌裡最晚的時刻（作答、壓縮、重置取最大）。
+
+    作答那一半讀 card_state.last_reviewed_at 而不是掃 review_event：重算按時間序
+    套用，所以每張卡的 last_reviewed_at 就是它最後一次重置之後最晚的作答；
+    重置之前的作答必然早於那次重置，而重置本身已經算在裡面。O(K) 而不是 O(E)。
+    """
+    times = [
+        parse(r["last_reviewed_at"])
+        for r in conn.execute(
+            "SELECT last_reviewed_at FROM card_state WHERE user_id=?", (user_id,)
+        )
+    ]
+    times += [t for t, *_ in _parsed_adjustments(conn, user_id)]
+    times += [t for rows in _parsed_resets_by_card(conn, user_id).values() for t, *_ in rows]
+    return max((t for t in times if t is not None), default=None)
+
+
+def compress_all_states(
+    conn: sqlite3.Connection, user_id: int, steps: list[tuple[ReviewSettings, float]],
+    skip: set[str] | frozenset[str] = frozenset(),
+) -> None:
+    """把「排在日誌最尾端」的壓縮直接套到每張卡的現有狀態上，每張卡只寫一次。
+
+    與 rebuild_card 等價：重算到最後也正是對同一個狀態依序做同樣幾次 compress_state，
+    而尾端的壓縮不影響任何作答事件的 before/after 快照，沒有東西要改寫。
+    差別是 O(K) 對上 O(K × (A + E))：原本每壓縮一次就整段重算全部卡片，
+    實測 1000 張卡、400 次壓縮時單一請求握寫鎖 8.7 秒，別的帳號的作答撞上
+    busy_timeout 回 500。steps 是一批的全部尾端壓縮 —— 逐次寫入的話一批 100 次
+    就是 10 萬次 upsert，同樣會把寫鎖握上好幾秒。
+
+    skip：這批稍後反正會整段重算的卡（見 main.sync 的 dirty），不必白寫一次。
+    """
+    if not steps:
+        return
+    rows = conn.execute(
+        "SELECT * FROM card_state WHERE user_id=?", (user_id,)
+    ).fetchall()
+    for r in rows:
+        if r["card_id"] in skip:
+            continue
+        state = CardState(
+            review_interval_hours=r["review_interval_hours"],
+            next_review_at=parse(r["next_review_at"]),
+            last_reviewed_at=parse(r["last_reviewed_at"]),
+            review_count=r["review_count"],
+            lapse_count=r["lapse_count"],
+            review_streak=r["review_streak"],
+            last_review_feedback=r["last_review_feedback"],
+        )
+        for cfg, factor in steps:
+            state = compress_state(state, cfg, factor)
+        put_state(conn, user_id, r["card_id"], r["deck"], state)
+
+
 def latest_reset_at(conn: sqlite3.Connection, user_id: int, card_id: str) -> datetime | None:
     rows = conn.execute(
         "SELECT reset_at FROM progress_reset WHERE user_id=? AND card_id=?",
@@ -744,21 +833,26 @@ def _events_for_card(conn: sqlite3.Connection, user_id: int, card_id: str) -> li
     return sorted(rows, key=lambda r: (parse(r["reviewed_at"]), r["id"]))
 
 
-def _timeline_for_card(conn: sqlite3.Connection, user_id: int, card_id: str) -> list[tuple]:
-    """合併作答、調整與重置，讓晚到的歷史事件仍能收斂。"""
+def _timeline_for_card(
+    conn: sqlite3.Connection, user_id: int, card_id: str,
+    adjustments: list[tuple] | None = None,
+    resets: dict[str, list[tuple]] | None = None,
+) -> list[tuple]:
+    """合併作答、調整與重置，讓晚到的歷史事件仍能收斂。
+
+    adjustments／resets 可由呼叫端預先載入（見 rebuild_cards）：它們是帳號層級的，
+    一次重算幾千張卡時每張都重查、重 parse 一遍，就是 K 倍的白工。
+    """
+    if adjustments is None:
+        adjustments = _parsed_adjustments(conn, user_id)
+    if resets is None:
+        resets = _parsed_resets_by_card(conn, user_id)
     timeline = [
         (parse(r["reviewed_at"]), 1, r["id"], "answer", r)
         for r in _events_for_card(conn, user_id, card_id)
     ]
-    timeline.extend(
-        (parse(r["applied_at"]), 0, r["client_action_id"], "adjustment", r)
-        for r in all_adjustments(conn, user_id)
-    )
-    timeline.extend(
-        (parse(r["reset_at"]), 0, r["client_action_id"], "reset", r)
-        for r in all_resets(conn, user_id)
-        if r["card_id"] == card_id
-    )
+    timeline.extend(adjustments)
+    timeline.extend(resets.get(card_id, ()))
     return sorted(timeline, key=lambda x: (x[0], x[1], x[2]))
 
 
@@ -807,8 +901,20 @@ def has_later_event(
     )
 
 
+def rebuild_cards(
+    conn: sqlite3.Connection, user_id: int, keys, cfg: ReviewSettings
+) -> None:
+    """批次重算：帳號層級的壓縮與重置只載入、parse 一次。"""
+    adjustments = _parsed_adjustments(conn, user_id)
+    resets = _parsed_resets_by_card(conn, user_id)
+    for card_id, deck in keys:
+        rebuild_card(conn, user_id, card_id, deck, cfg,
+                     adjustments=adjustments, resets=resets)
+
+
 def rebuild_card(
-    conn: sqlite3.Connection, user_id: int, card_id: str, deck: str, cfg: ReviewSettings
+    conn: sqlite3.Connection, user_id: int, card_id: str, deck: str, cfg: ReviewSettings,
+    *, adjustments: list[tuple] | None = None, resets: dict[str, list[tuple]] | None = None,
 ) -> CardState:
     """把這張卡從事件日誌整段重算，並改寫每筆事件的 before/after 快照。
 
@@ -827,7 +933,7 @@ def rebuild_card(
     v3 之前的事件沒有記錄 preset，只能用呼叫端給的 cfg（那個資訊已經不在了）。
     """
     state = None
-    for _, _, _, kind, row in _timeline_for_card(conn, user_id, card_id):
+    for _, _, _, kind, row in _timeline_for_card(conn, user_id, card_id, adjustments, resets):
         if kind == "reset":
             state = None
             continue

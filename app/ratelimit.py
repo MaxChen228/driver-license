@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import threading
 import time
 from dataclasses import dataclass, field
@@ -33,6 +34,26 @@ def client_ip(request) -> str:
     return peer
 
 
+def ip_key(ip: str) -> str:
+    """限流用的 IP 維度 key：IPv6 一律收斂到 /64。
+
+    一般住宅／行動網路配給一個客戶的是整段 /64（2^64 個位址），以完整位址當 key
+    的話，換個位址就是一桶全新的配額 —— 實測 400 個偽造 IPv6 的假登入全數放行，
+    把程序 RSS 推到 5.1 GB。/64 是「一個客戶」最小的誠實單位。
+    IPv4-mapped（::ffff:1.2.3.4）還原成 IPv4，否則同一個人會有兩桶。
+    解析不了的字串原樣回傳：它只可能來自受信任代理塞的標頭，不是攻擊面。
+    """
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    if isinstance(addr, ipaddress.IPv6Address):
+        if addr.ipv4_mapped is not None:
+            return str(addr.ipv4_mapped)
+        return str(ipaddress.IPv6Network((addr, 64), strict=False))
+    return str(addr)
+
+
 @dataclass
 class _Bucket:
     tokens: float
@@ -52,8 +73,8 @@ class Limiter:
     # 被丟掉的等於重新獲得配額，但要撐滿這個上限本身就得先通過 IP 維度的限流。
     MAX_KEYS = 50_000
 
-    def check(self, key: str) -> float:
-        """回傳 0 表示放行；否則回傳「還要等幾秒」。"""
+    def check(self, key: str, cost: int = 1) -> float:
+        """扣 cost 個 token。回傳 0 表示放行；否則回傳「還要等幾秒」（不扣）。"""
         rate = self.capacity / self.per_seconds
         now = time.monotonic()
         with self._lock:
@@ -63,14 +84,13 @@ class Limiter:
                     del self._buckets[k]
             b = self._buckets.get(key)
             if b is None:
-                self._buckets[key] = _Bucket(self.capacity - 1, now)
-                return 0.0
+                b = self._buckets[key] = _Bucket(self.capacity, now)
             b.tokens = min(self.capacity, b.tokens + (now - b.updated) * rate)
             b.updated = now
-            if b.tokens >= 1:
-                b.tokens -= 1
+            if b.tokens >= cost:
+                b.tokens -= cost
                 return 0.0
-            return (1 - b.tokens) / rate
+            return (cost - b.tokens) / rate
 
     def forget(self, key: str) -> None:
         """登入成功後把該帳號的失敗計數清掉，密碼對了就不該再被自己的重試拖累。"""
@@ -91,8 +111,12 @@ LOGIN_USER = Limiter(capacity=8, per_seconds=60)
 REGISTER_IP = Limiter(capacity=5, per_seconds=3600)
 RECOVER_IP = Limiter(capacity=5, per_seconds=3600)
 SYNC_USER = Limiter(capacity=120, per_seconds=60)
+# 每個帳號每天能新增幾列日誌（作答＋重置＋壓縮）。SYNC_USER 數的是請求，而一個請求
+# 最多帶上萬筆 —— 只靠它的話，一個帳號一分鐘就能寫進 60 萬列。兩萬列／天是
+# 「每 5 秒答一題、連續 24 小時」再加上一倍餘裕，正常刷題永遠碰不到。
+LOG_ROWS_USER = Limiter(capacity=20_000, per_seconds=86_400)
 
-ALL = (LOGIN_IP, LOGIN_USER, REGISTER_IP, RECOVER_IP, SYNC_USER)
+ALL = (LOGIN_IP, LOGIN_USER, REGISTER_IP, RECOVER_IP, SYNC_USER, LOG_ROWS_USER)
 
 
 def reset_all() -> None:

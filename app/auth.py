@@ -23,6 +23,8 @@ import hashlib
 import re
 import secrets
 import sqlite3
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
@@ -38,6 +40,50 @@ from . import db
 # 沒有取更高的記憶體成本是因為這台機器同時在跑 Xcode build，而限流已經把並發壓住；
 # 128 MiB 仍是 OWASP 次要建議值（19 MiB）的六倍以上。
 _hasher = PasswordHasher(memory_cost=131072, time_cost=4, parallelism=2)
+
+
+
+class _Argon2Gate:
+    """同時最多幾個 Argon2 在算，外加一條有上限的等候線；滿了直接 503。
+
+    限流管的是「每個來源多快」，管不到「全部來源加起來同時幾個」。每次雜湊吃
+    128 MiB，而 sync 端點跑在 anyio 的 40 條共用執行緒上 —— 實測 400 個偽造 IP
+    的假登入讓 RSS 衝到 5.1 GB，同時間一個匿名 GET /api/config 等了 45 秒。
+    這道閘把兩件事都封頂：記憶體 ≤ slots × 128 MiB，佔用的執行緒 ≤ slots + queue，
+    其餘請求照常有執行緒可用。滿了回 503 而不是排隊，是因為排隊本身就在佔執行緒。
+    """
+
+    def __init__(self, slots: int, queue: int, wait_seconds: float):
+        self._slots = threading.BoundedSemaphore(slots)
+        self._capacity = slots + queue
+        self._wait = wait_seconds
+        self._inside = 0  # 正在算 + 正在等
+        self._lock = threading.Lock()
+
+    @contextmanager
+    def slot(self):
+        with self._lock:
+            if self._inside >= self._capacity:
+                raise _busy()
+            self._inside += 1
+        try:
+            if not self._slots.acquire(timeout=self._wait):
+                raise _busy()
+            try:
+                yield
+            finally:
+                self._slots.release()
+        finally:
+            with self._lock:
+                self._inside -= 1
+
+
+def _busy() -> HTTPException:
+    return HTTPException(503, "伺服器忙碌中，請稍後再試", headers={"retry-after": "5"})
+
+
+# felix 是 M3（8 核），parallelism=2 → 4 個並行雜湊吃滿 8 核、512 MiB。
+ARGON2_GATE = _Argon2Gate(slots=4, queue=8, wait_seconds=5)
 
 # 帳號不存在時也要跑一次驗證，否則「查無此人」會比「密碼錯誤」快一個數量級，
 # 光靠計時就能把帳號列舉出來。這個雜湊的明文永遠不會有人猜中。
@@ -81,16 +127,22 @@ def validate_password(password: str) -> str:
 
 
 def hash_password(password: str) -> str:
-    return _hasher.hash(password)
+    with ARGON2_GATE.slot():
+        return _hasher.hash(password)
 
 
-def verify_password(stored_hash: str | None, password: str) -> bool:
+def _verify(stored_hash: str | None, secret: str) -> bool:
     """stored_hash 為 None（尚未設密碼的帳號）也要跑滿一次雜湊，時間不能有差別。"""
     try:
-        _hasher.verify(stored_hash or _DUMMY_HASH, password)
+        with ARGON2_GATE.slot():
+            _hasher.verify(stored_hash or _DUMMY_HASH, secret)
     except (VerifyMismatchError, InvalidHashError):
         return False
     return stored_hash is not None
+
+
+def verify_password(stored_hash: str | None, password: str) -> bool:
+    return _verify(stored_hash, password)
 
 
 def needs_rehash(stored_hash: str) -> bool:
@@ -112,15 +164,12 @@ def normalize_recovery_code(code: str) -> str:
 
 
 def hash_recovery_code(code: str) -> str:
-    return _hasher.hash(normalize_recovery_code(code))
+    with ARGON2_GATE.slot():
+        return _hasher.hash(normalize_recovery_code(code))
 
 
 def verify_recovery_code(stored_hash: str | None, code: str) -> bool:
-    try:
-        _hasher.verify(stored_hash or _DUMMY_HASH, normalize_recovery_code(code))
-    except (VerifyMismatchError, InvalidHashError):
-        return False
-    return stored_hash is not None
+    return _verify(stored_hash, normalize_recovery_code(code))
 
 
 # ---------------------------------------------------------------- session

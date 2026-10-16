@@ -18,6 +18,7 @@ import random
 import sqlite3
 import sys
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -26,7 +27,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from . import auth, db, ratelimit, srs, timeline
 from .deck import DATA_DIR, DECKS, load_decks
@@ -223,8 +224,8 @@ class DeleteAccountIn(BaseModel):
     password: Password
 
 
-def _limit(limiter: ratelimit.Limiter, key: str) -> None:
-    wait = limiter.check(key)
+def _limit(limiter: ratelimit.Limiter, key: str, cost: int = 1) -> None:
+    wait = limiter.check(key, cost)
     if wait:
         raise HTTPException(
             429, "太頻繁了，稍後再試", headers={"retry-after": str(int(wait) + 1)}
@@ -253,7 +254,7 @@ def _verify_turnstile(token: str | None, ip: str) -> None:
 @app.post("/api/auth/register")
 def register(payload: RegisterIn, request: Request):
     ip = ratelimit.client_ip(request)
-    _limit(ratelimit.REGISTER_IP, ip)
+    _limit(ratelimit.REGISTER_IP, ratelimit.ip_key(ip))
     _verify_turnstile(payload.turnstile_token, ip)
     auth.validate_username(payload.username)
     auth.validate_password(payload.password)
@@ -273,7 +274,7 @@ def register(payload: RegisterIn, request: Request):
 @app.post("/api/auth/login")
 def login(payload: LoginIn, request: Request):
     ip = ratelimit.client_ip(request)
-    _limit(ratelimit.LOGIN_IP, ip)
+    _limit(ratelimit.LOGIN_IP, ratelimit.ip_key(ip))
     _limit(ratelimit.LOGIN_USER, payload.username.lower())
 
     # 雜湊驗證在交易「外面」。Argon2 一次 143ms，跑在 BEGIN IMMEDIATE 裡等於讓
@@ -348,7 +349,7 @@ def change_password(payload: PasswordIn, request: Request,
 @app.post("/api/auth/recover")
 def recover(payload: RecoverIn, request: Request):
     ip = ratelimit.client_ip(request)
-    _limit(ratelimit.RECOVER_IP, ip)
+    _limit(ratelimit.RECOVER_IP, ratelimit.ip_key(ip))
     auth.validate_password(payload.new_password)
 
     with db.session() as conn:
@@ -509,38 +510,58 @@ def card(card_id: str, user: sqlite3.Row = CurrentUser):
 # ---------------------------------------------------------------- answering
 
 
+# 題號最長 6 字（HC0001）。上限給寬，擋的是「拿 card_id 當任意長度的儲存空間」。
+CardId = Annotated[str, Field(max_length=32)]
+ClientId = Annotated[str, Field(min_length=1, max_length=128)]
+ELAPSED_MS_MAX = 86_400_000
+
+
 class AnswerIn(BaseModel):
-    card_id: str
+    card_id: CardId
     chosen: int = Field(ge=1, le=3)
     elapsed_ms: int | None = None
     guessed: bool = False  # 三選一有 33% 猜對率 —— 按了就把答對覆寫成 forgot
     reviewed_at: datetime | None = None  # 離線作答的真實時刻
-    client_event_id: str | None = None   # 冪等鍵，重覆補送只算一次
+    client_event_id: ClientId | None = None   # 冪等鍵，重覆補送只算一次
+
+    @field_validator("elapsed_ms")
+    @classmethod
+    def _clamp_elapsed(cls, v: int | None) -> int | None:
+        """夾住而不是拒絕：分頁開著放一整天再作答是正常的，拒絕會讓整批補送 422、
+        卡在 outbox 裡永遠送不出去。不夾的話 2**63 以上的整數會讓 SQLite 拋
+        OverflowError，變成 500。"""
+        return None if v is None else max(0, min(v, ELAPSED_MS_MAX))
 
 
 class RegradeIn(BaseModel):
-    card_id: str
+    card_id: CardId
 
 
 class AdjustmentIn(BaseModel):
-    client_action_id: str = Field(min_length=1, max_length=128)
+    client_action_id: ClientId
     applied_at: datetime | None = None
     factor: float = Field(default=2.0, gt=0, le=10)
 
 
 class ResetIn(BaseModel):
-    card_id: str
-    client_action_id: str = Field(min_length=1, max_length=128)
+    card_id: CardId
+    client_action_id: ClientId
     reset_at: datetime | None = None
 
 
 class SyncIn(BaseModel):
     # 上限不是效能考量，是「一個請求能讓伺服器做多少事」的閘門。
     # 前端補送本來就分批（每批 500 筆），正常使用永遠碰不到。
+    # 前端每次都把「全部」壓縮與重置重送（冪等），所以這兩個上限必須比 db 的
+    # 每帳號上限寬，留給「離線時新增、還沒送上來」的那幾筆。
     answers: list[AnswerIn] = Field(default_factory=list, max_length=5000)
-    adjustments: list[AdjustmentIn] = Field(default_factory=list, max_length=100)
-    resets: list[ResetIn] = Field(default_factory=list, max_length=5000)
-    notes: dict[str, Annotated[str, Field(max_length=4000)]] = Field(
+    adjustments: list[AdjustmentIn] = Field(
+        default_factory=list, max_length=db.MAX_ADJUSTMENTS_PER_USER + 100
+    )
+    resets: list[ResetIn] = Field(
+        default_factory=list, max_length=db.MAX_RESETS_PER_USER + 1000
+    )
+    notes: dict[CardId, Annotated[str, Field(max_length=4000)]] = Field(
         default_factory=dict, max_length=5000
     )
 
@@ -551,6 +572,37 @@ def _question(card_id: str) -> dict:
         if q:
             return q
     raise HTTPException(404, f"unknown card: {card_id}")
+
+
+@dataclass
+class _LogQuota:
+    """這個帳號還能新增幾列重置／壓縮。整批同步時只數一次，逐筆遞減。"""
+
+    resets: int
+    adjustments: int
+
+
+def _log_quota(conn, user_id: int) -> _LogQuota:
+    _, resets, adjustments = db.log_counts(conn, user_id)
+    return _LogQuota(
+        resets=db.MAX_RESETS_PER_USER - resets,
+        adjustments=db.MAX_ADJUSTMENTS_PER_USER - adjustments,
+    )
+
+
+def _reserve_log_rows(conn, user_id: int, *, answers: int = 0, others: int = 0) -> None:
+    """寫入前先過兩道閘：作答總量的硬上限，以及每日新增列數的配額。
+
+    兩者都在任何寫入之前、以整個請求為單位擋下（409／429）。不能逐筆記進 failed：
+    前端會把 failed 的作答從 outbox 丟掉，那是使用者的真實作答，丟了就補不回來；
+    整批拒絕則會留在 outbox，等配額回來或人工處理。
+    """
+    if answers:
+        events, _, _ = db.log_counts(conn, user_id)
+        if events + answers > db.MAX_EVENTS_PER_USER:
+            raise HTTPException(409, "作答紀錄已達這個帳號的上限")
+    if answers + others:
+        _limit(ratelimit.LOG_ROWS_USER, str(user_id), answers + others)
 
 
 def _record(conn, user_id: int, q: dict, chosen: int | None, correct: bool, remembered: bool,
@@ -639,23 +691,43 @@ def _apply_answer(conn, user_id: int, payload: AnswerIn,
 def _apply_adjustment(
     conn, user_id: int, payload: AdjustmentIn,
     dirty: set[tuple[str, str]] | None = None,
+    quota: _LogQuota | None = None,
+    tail: list[tuple[srs.ReviewSettings, float]] | None = None,
 ) -> bool:
-    """記下一次全域壓縮，並把既有卡片排程交給事件重播重算。"""
+    """記下一次全域壓縮。
+
+    常見情況（按下按鈕的當下，晚於日誌裡的一切）直接套到現有狀態，O(K)；
+    只有離線補送、時間落在既有歷史中間的壓縮才需要事件重播。
+    tail 不是 None 表示整批做完再一次套用（/api/sync），理由同 dirty。
+    """
     if db.adjustment_exists(conn, user_id, payload.client_action_id):
         return False
+    quota = quota or _log_quota(conn, user_id)
+    if quota.adjustments <= 0:
+        raise HTTPException(409, "進度壓縮次數已達上限")
+    quota.adjustments -= 1
     cfg = _cfg(conn, user_id)
+    # 經 iso/parse 正規化：沒帶時區的 applied_at 一律當 UTC，跟日誌裡的時刻同一把尺
+    applied_at = db.parse(db.iso(payload.applied_at or srs.utcnow()))
+    latest = db.latest_log_time(conn, user_id)  # 必須在記下這一筆之前取
     db.log_adjustment(
         conn, user_id,
         client_action_id=payload.client_action_id,
-        applied_at=payload.applied_at or srs.utcnow(),
+        applied_at=applied_at,
         factor=payload.factor,
         min_hours=cfg.min_hours,
         max_hours=cfg.max_hours,
     )
+    # 嚴格大於：同一時刻的壓縮在重播時排在作答「之前」，不算尾端
+    if latest is None or applied_at > latest:
+        if tail is None:
+            db.compress_all_states(conn, user_id, [(cfg, payload.factor)])
+        else:
+            tail.append((cfg, payload.factor))
+        return True
     keys = db.card_keys(conn, user_id)
     if dirty is None:
-        for card_id, deck in keys:
-            db.rebuild_card(conn, user_id, card_id, deck, cfg)
+        db.rebuild_cards(conn, user_id, keys, cfg)
     else:
         dirty.update(keys)
     return True
@@ -664,11 +736,16 @@ def _apply_adjustment(
 def _apply_reset(
     conn, user_id: int, payload: ResetIn,
     dirty: set[tuple[str, str]] | None = None,
+    quota: _LogQuota | None = None,
 ) -> bool:
     """記下重置邊界；事件重播會忽略它之前的作答。"""
     q = _question(payload.card_id)
     if db.reset_exists(conn, user_id, payload.client_action_id):
         return False
+    quota = quota or _log_quota(conn, user_id)
+    if quota.resets <= 0:
+        raise HTTPException(409, "重置次數已達上限")
+    quota.resets -= 1
     db.log_reset(
         conn, user_id,
         card_id=q["id"],
@@ -688,6 +765,7 @@ def answer(payload: AnswerIn, user: sqlite3.Row = CurrentUser):
         uid = user["id"]
         if payload.client_event_id and db.event_exists(conn, uid, payload.client_event_id):
             raise HTTPException(409, "duplicate client_event_id")
+        _reserve_log_rows(conn, uid, answers=1)
         return _apply_answer(conn, uid, payload)
 
 
@@ -695,6 +773,8 @@ def answer(payload: AnswerIn, user: sqlite3.Row = CurrentUser):
 def compress_progress(payload: AdjustmentIn, user: sqlite3.Row = CurrentUser):
     """把這個帳號目前已答過的卡片排程縮短一半。"""
     with db.session(write=True) as conn:
+        if not db.adjustment_exists(conn, user["id"], payload.client_action_id):
+            _reserve_log_rows(conn, user["id"], others=1)
         _apply_adjustment(conn, user["id"], payload)
         return _state_payload(conn, user["id"])
 
@@ -703,6 +783,8 @@ def compress_progress(payload: AdjustmentIn, user: sqlite3.Row = CurrentUser):
 def reset_progress(payload: ResetIn, user: sqlite3.Row = CurrentUser):
     """清除一題在重置時間以前的複習痕跡，讓它回到未學習。"""
     with db.session(write=True) as conn:
+        if not db.reset_exists(conn, user["id"], payload.client_action_id):
+            _reserve_log_rows(conn, user["id"], others=1)
         _apply_reset(conn, user["id"], payload)
         return _state_payload(conn, user["id"])
 
@@ -880,11 +962,29 @@ def sync(payload: SyncIn, user: sqlite3.Row = CurrentUser):
     )
     _limit(ratelimit.SYNC_USER, str(user["id"]))
     dirty: set[tuple[str, str]] = set()
+    tail: list[tuple[srs.ReviewSettings, float]] = []
     with db.session(write=True) as conn:
         uid = user["id"]
+        # 先數「真的是新的」有幾筆再收費。重送是常態（前端每次都把全部壓縮與重置
+        # 重送，斷線後整批重送），拿請求長度收費的話正常使用者也會被扣光。
+        _reserve_log_rows(
+            conn, uid,
+            answers=sum(
+                1 for a in payload.answers
+                if not (a.client_event_id and db.event_exists(conn, uid, a.client_event_id))
+            ),
+            others=sum(
+                1 for r in payload.resets
+                if not db.reset_exists(conn, uid, r.client_action_id)
+            ) + sum(
+                1 for a in payload.adjustments
+                if not db.adjustment_exists(conn, uid, a.client_action_id)
+            ),
+        )
+        quota = _log_quota(conn, uid)
         for reset in payload.resets:
             try:
-                if _apply_reset(conn, uid, reset, dirty):
+                if _apply_reset(conn, uid, reset, dirty, quota):
                     reset_applied.append(reset.client_action_id)
                 else:
                     reset_skipped.append(reset.client_action_id)
@@ -895,7 +995,7 @@ def sync(payload: SyncIn, user: sqlite3.Row = CurrentUser):
                 })
         for adjustment in payload.adjustments:
             try:
-                if _apply_adjustment(conn, uid, adjustment, dirty):
+                if _apply_adjustment(conn, uid, adjustment, dirty, quota, tail):
                     adjustment_applied.append(adjustment.client_action_id)
                 else:
                     adjustment_skipped.append(adjustment.client_action_id)
@@ -918,7 +1018,14 @@ def sync(payload: SyncIn, user: sqlite3.Row = CurrentUser):
             except HTTPException as exc:
                 failed.append({"client_event_id": a.client_event_id, "detail": exc.detail})
 
+        notes_failed = []
         for card_id, body in payload.notes.items():
+            # 筆記的 key 只能是題庫裡的題號。不驗的話，一個請求就能塞 5000 列
+            # 任意 key 的筆記（實測 22 MB），每分鐘 120 次 —— 半小時寫滿 felix。
+            # 驗過之後，每個帳號的筆記總量天然封頂在「題數 × 4000 字」。
+            if not any(card_id in d.by_id for d in DECK_DATA.values()):
+                notes_failed.append(card_id)
+                continue
             text = body.strip()
             if text:
                 conn.execute(
@@ -936,15 +1043,18 @@ def sync(payload: SyncIn, user: sqlite3.Row = CurrentUser):
         # 每碰一次重算一次是白工，而且中間那些結果反正都會被最後一次覆蓋。
         # dirty 帶著 deck 一起收：迴圈外再呼叫 _question 的話，孤兒題號的 404
         # 會炸掉整個請求並回捲所有已寫入的事件（迴圈內的 404 是被 except 接走的）。
-        cfg = _cfg(conn, uid)
-        for card_id, deck in sorted(dirty):
-            db.rebuild_card(conn, uid, card_id, deck, cfg)
+        # 尾端壓縮先套到「不會被重算」的卡；會被重算的卡從日誌重放時自然包含它們。
+        # 中段壓縮會把全部卡片放進 dirty，那時 tail 必然不會套到任何一張。
+        db.compress_all_states(conn, uid, tail, skip={card_id for card_id, _ in dirty})
+        db.rebuild_cards(conn, uid, sorted(dirty), _cfg(conn, uid))
 
         # 刻意在寫入交易內取快照：回傳的狀態必須剛好等於這批補送的結果，
         # 出了交易再讀就可能夾雜別台裝置插進來的寫入。代價是寫鎖多握一小段。
         out = _state_payload(conn, uid)
 
     out["sync"] = {"applied": applied, "skipped": skipped, "failed": failed}
+    if notes_failed:
+        out["sync"]["notes_failed"] = notes_failed
     if payload.adjustments:
         out["sync"]["adjustments"] = {
             "applied": adjustment_applied,
@@ -976,6 +1086,7 @@ def get_note(card_id: str, user: sqlite3.Row = CurrentUser):
 
 @app.put("/api/note/{card_id}")
 def put_note(card_id: str, payload: NoteIn, user: sqlite3.Row = CurrentUser):
+    card_id = _question(card_id)["id"]  # 不在題庫裡就 404，理由見 sync 的筆記段
     body = payload.body.strip()
     with db.session(write=True) as conn:
         uid = user["id"]
