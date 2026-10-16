@@ -51,8 +51,12 @@
   <true/>
   <key>ThrottleInterval</key>
   <integer>10</integer>
+  <!-- Standard，不是 Background。Background 會被排到效能核心以外、QoS 降級：
+       實測同一份程式碼在 felix 上登入 830ms 對 139ms（Argon2 本身 135ms），
+       每個請求都慢約 6 倍，Argon2 閘的吞吐也跟著掉到 1/6。這是對外的 web 服務，
+       不是可以讓路的背景工作（那種是 com.driverlicense.backup）。 -->
   <key>ProcessType</key>
-  <string>Background</string>
+  <string>Standard</string>
   <key>StandardOutPath</key>
   <string>/Users/chenliangyu/Library/Logs/driver-license.out.log</string>
   <key>StandardErrorPath</key>
