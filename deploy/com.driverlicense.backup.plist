@@ -3,6 +3,7 @@
 <!--
   driver-license 進度 DB 每日備份（felix 常駐機）。
 
+  （2026-10-23 起異地改為冷磁碟；launchd 的 bash 無 FDA 寫不了外接碟，故以有 FDA 的 uv 當啟動器。）
   跑 ops/backup.sh：sqlite3 .backup 取一致快照 → 驗 integrity_check → gzip
   → 本地保留 14 份 + 上傳 S3 butler-backups-967512079054/driver-license/。
 
@@ -24,6 +25,9 @@
 
     <key>ProgramArguments</key>
     <array>
+        <string>/Users/chenliangyu/.local/bin/uv</string>
+        <string>run</string>
+        <string>--no-project</string>
         <string>/bin/bash</string>
         <string>/Users/chenliangyu/project/driver-license/ops/backup.sh</string>
     </array>
@@ -34,6 +38,8 @@
         <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>DL_DATA_DIR</key>
         <string>/Users/chenliangyu/driver-license-data</string>
+        <key>DL_BACKUP_DEST_DIR</key>
+        <string>/Volumes/TOSHIBA EXT/s3-backups/butler-backups-967512079054</string>
         <key>DL_BACKUP_LOG</key>
         <string>/Users/chenliangyu/Library/Logs/driver-license-backup.log</string>
     </dict>
