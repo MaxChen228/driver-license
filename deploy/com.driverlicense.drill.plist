@@ -31,12 +31,12 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/chenliangyu/project/driver-license/ops/restore-drill.sh</string>
+        <string>/Users/chenliangyu/project/MaxChen228/driver-license/ops/restore-drill.sh</string>
         <string>--s3</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/chenliangyu/project/driver-license</string>
+    <string>/Users/chenliangyu/project/MaxChen228/driver-license</string>
 
     <key>EnvironmentVariables</key>
     <dict>

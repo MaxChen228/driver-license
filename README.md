@@ -1,6 +1,6 @@
 # driver-license
 
-台灣汽機車駕照筆試刷題 app。題庫從監理所公告 PDF 抽出，複習排程移植自 `~/project/kg` 的 flash card system。
+台灣汽機車駕照筆試刷題 app。題庫從監理所公告 PDF 抽出，複習排程移植自 `~/project/Books-Vocab/kg` 的 flash card system。
 
 部署在 felix 常駐機，對外兩條路：
 
@@ -175,7 +175,7 @@ v4 = `review_event.preset_params`，custom 那一刻的五個數值快照（名�
 
 ```bash
 ssh chenliangyu@100.118.39.104
-cd ~/project/driver-license
+cd ~/project/MaxChen228/driver-license
 bash ops/deploy.sh
 ```
 

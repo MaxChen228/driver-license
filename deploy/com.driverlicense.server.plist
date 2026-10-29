@@ -33,10 +33,10 @@
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>/Users/chenliangyu/project/driver-license/deploy/run-server.sh</string>
+    <string>/Users/chenliangyu/project/MaxChen228/driver-license/deploy/run-server.sh</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>/Users/chenliangyu/project/driver-license</string>
+  <string>/Users/chenliangyu/project/MaxChen228/driver-license</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>

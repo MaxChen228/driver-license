@@ -1,4 +1,4 @@
-"""間隔重複排程 —— 移植自 ~/project/kg 的 VocabularyReviewPolicy。
+"""間隔重複排程 —— 移植自 ~/project/Books-Vocab/kg 的 VocabularyReviewPolicy。
 
 刻意「不是」SM-2 / Leitner / FSRS：二元評分、乘法式間隔、單位小時、無 ease factor。
 
