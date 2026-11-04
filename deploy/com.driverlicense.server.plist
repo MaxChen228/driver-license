@@ -15,7 +15,7 @@
      (1) Cloudflare Tunnel → https://drive.wordnexus.lol（公網，帳號制）
      (2) tailscale serve（TLS 終結在 tailscaled，Let's Encrypt 真憑證）：
        tailscale serve --bg --https=443 http://127.0.0.1:8006
-       → https://s-macbook-air.tail8c391d.ts.net/    （tailnet only，非 funnel）
+       → https://felix.tail8c391d.ts.net/    （tailnet only，非 funnel）
      為什麼非 HTTPS 不可：PWA 的 service worker 只在安全來源註冊，
      http://100.118.39.104:8006 這種純 HTTP 的 LAN 位址一律被瀏覽器拒絕，
      離線功能會整個失效（而且不會有錯誤訊息，只是靜靜地不生效）。

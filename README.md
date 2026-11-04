@@ -7,7 +7,7 @@
 | 入口 | 網址 | 誰看得到 |
 |---|---|---|
 | Cloudflare Tunnel | https://drive.wordnexus.lol | 公網 |
-| tailscale serve | https://s-macbook-air.tail8c391d.ts.net | tailnet |
+| tailscale serve | https://felix.tail8c391d.ts.net | tailnet |
 
 兩條都終結在 `127.0.0.1:8006`。**這推翻了本專案早期「tailnet 即邊界、無認證、
 絕不掛 Cloudflare Tunnel」的決定** —— 邊界改由 app 自己守（見「身分模型」）。
