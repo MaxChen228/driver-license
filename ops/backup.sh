@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# driver-license 進度 DB 每日備份 → 本地輪替 + 冷磁碟（DL_BACKUP_DEST_DIR）或 AWS S3。
+# driver-license 進度 DB 每日備份 → 本地輪替 + 冷藏碟（唯一的遠端目的地；DL_BACKUP_DEST_DIR 必填）。
 #
 # 為什麼一定要用 sqlite3 .backup 而不是 cp／tar：
 #   這個 DB 開 WAL 模式，主檔可以長期停在 4KB 而所有已提交的資料都還在 app.db-wal 裡
@@ -11,11 +11,10 @@
 #
 # 產出：
 #   本地 $DATA_DIR/backups/app-YYYY-MM-DD.db.gz  （保留 $KEEP 份，就地快速還原用）
-#   冷磁碟 $DL_BACKUP_DEST_DIR/driver-license/YYYY-MM-DD.db.gz （2026-10-23 起；保留 $COLD_KEEP 份）
+#   冷藏碟 $DL_BACKUP_DEST_DIR/driver-license/YYYY-MM-DD.db.gz （保留 $COLD_KEEP 份）
 #         目錄必須已存在（磁碟沒掛載 → exit=6，不會寫進內建碟）。
-#   S3   s3://$BUCKET/driver-license/YYYY-MM-DD.db.gz （DL_BACKUP_DEST_DIR 未設時的舊路徑）
 #
-# 每次執行寫一行稽核 log：<timestamp> exit=<rc> bytes=<size> sha256=<hash> key=<s3 key>
+# 每次執行寫一行稽核 log：<timestamp> exit=<rc> bytes=<size> sha256=<hash> key=<key>
 #
 # 還原：
 #   gunzip -c app-2026-07-27.db.gz > ~/driver-license-data/app.db
@@ -24,8 +23,6 @@
 set -euo pipefail
 
 DATA_DIR="${DL_DATA_DIR:-$HOME/driver-license-data}"
-BUCKET="${DL_BACKUP_BUCKET:-butler-backups-967512079054}"
-REGION="${DL_BACKUP_REGION:-ap-northeast-1}"
 LOG="${DL_BACKUP_LOG:-$HOME/Library/Logs/driver-license-backup.log}"
 KEEP="${DL_BACKUP_KEEP:-14}"
 COLD_DIR="${DL_BACKUP_DEST_DIR:-}"
@@ -39,6 +36,8 @@ KEY="driver-license/${DATE}.db.gz"
 
 mkdir -p "$OUT_DIR" "$(dirname "$LOG")"
 log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >>"$LOG"; }
+# 冷藏碟是唯一目的地：未設即 fail-closed（不寫本地以外的任何地方，也不退回 S3）。
+if [[ -z "$COLD_DIR" ]]; then log "exit=6 DL_BACKUP_DEST_DIR unset: backups go to the cold drive only"; exit 6; fi
 trap 'rc=$?; [[ $rc -eq 0 ]] || log "exit=$rc (unexpected)"; exit $rc' ERR
 
 if [[ ! -f "$DB" ]]; then
@@ -88,7 +87,6 @@ ls -1t "$OUT_DIR"/app-*.db.gz 2>/dev/null | tail -n "+$((KEEP + 1))" | while rea
 done
 
 rc=0
-if [[ -n "$COLD_DIR" ]]; then
   if [[ -d "$COLD_DIR" && -w "$COLD_DIR" ]] && mkdir -p "$COLD_DIR/driver-license"; then
     cp "$DEST" "$COLD_DIR/${KEY}.part" && mv -f "$COLD_DIR/${KEY}.part" "$COLD_DIR/${KEY}" || rc=$?
     if [[ $rc -eq 0 ]]; then
@@ -100,11 +98,6 @@ if [[ -n "$COLD_DIR" ]]; then
   else
     rc=6
   fi
-elif command -v aws >/dev/null 2>&1; then
-  aws s3 cp "$DEST" "s3://${BUCKET}/${KEY}" --region "$REGION" --no-progress >/dev/null || rc=$?
-else
-  rc=5
-fi
 
 log "exit=$rc bytes=$SIZE sha256=$SHA users=$USERS cards=$CARDS events=$EVENTS key=$KEY"
 exit "$rc"
